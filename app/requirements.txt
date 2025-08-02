@@ -1,0 +1,55 @@
+# FastAPI and core dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# Database
+sqlalchemy==2.0.23
+asyncpg==0.29.0
+alembic==1.12.1
+geoalchemy2==0.14.2
+
+# PostgreSQL and PostGIS
+psycopg2-binary==2.9.9
+
+# Weather and geographic data
+aiohttp==3.9.1
+requests==2.31.0
+# pygrib==2.1.5
+python-multipart==0.0.6
+cfgrib>=0.9.10
+xarray
+eccodes
+networkx
+
+# Geometric operations
+shapely==2.0.2
+geopy==2.4.0
+
+# Scientific computing
+numpy>=1.26.0
+scipy>=1.11.4
+
+# Caching
+redis==5.0.1
+aioredis==2.0.1
+
+# Monitoring and logging
+structlog==23.2.0
+python-json-logger==2.0.7
+
+# Development and testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+httpx==0.25.2
+
+# Security
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.6
+
+# Utilities
+click==8.1.7
+python-dotenv==1.0.0
