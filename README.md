@@ -77,7 +77,7 @@ The API documentation will be available at `http://127.0.0.1:8000/docs`.
 
 ## Testing
 
-To run database unit tests:
+To run db unit tests:
 
 ```bash
 poetry run pytest app/test/database/database.py -v
