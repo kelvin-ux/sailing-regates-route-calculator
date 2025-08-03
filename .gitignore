@@ -211,3 +211,4 @@ __marimo__/
 sailingregates/
 .idea/
 database.db
+.DS_Store
