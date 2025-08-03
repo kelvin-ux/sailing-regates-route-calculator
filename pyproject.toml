@@ -51,5 +51,4 @@ markers = [
 # Suppress warnings
 filterwarnings = [
     "ignore::DeprecationWarning",
-    "ignore::PytestDeprecationWarning"
 ]

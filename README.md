@@ -25,3 +25,13 @@ uvicorn app.main:app --reload
 ```
 
 API will be available at `http://127.0.0.1:8000/docs` or `http://0.0.0.0:8000/docs` by default.
+
+## Tests 
+
+Test are available runage:
+
+```bash
+poetry run pytest app/test/database/database.py -v # database module only
+
+# API test to be implemented
+```

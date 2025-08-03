@@ -155,7 +155,6 @@ class TestRoute(DatabaseTest):
         return Route(
             user_id=uuid4(),
             yacht_id=yacht_id,
-            is_main=True,
             description=description,
             estimated_duration=2.5,
             difficulty_level=3
@@ -575,7 +574,6 @@ def sample_route(db_session, sample_yacht):
         user_id=uuid4(),
         yacht_id=sample_yacht.id,
         description="Test Route",
-        is_main=True
     )
     db_session.add(route)
     db_session.commit()
