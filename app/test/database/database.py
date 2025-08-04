@@ -25,7 +25,6 @@ class DatabaseTest(unittest.TestCase):
         Base.metadata.create_all(self.engine)
 
     def tearDown(self):
-        # Rollback any pending transactions
         if self.Session.is_active:
             self.Session.rollback()
         Base.metadata.drop_all(self.engine)
@@ -66,7 +65,6 @@ class TestYacht(DatabaseTest):
         self.assertIsInstance(yacht_db.polar_data, dict)
         self.assertEqual(yacht_db.polar_data["90"], 6.8)
 
-    # Helper method
     def create_yacht_instance(self) -> Yacht:
         yacht = Yacht(
             name="Test Yacht",
@@ -106,7 +104,6 @@ class TestRoute(DatabaseTest):
         self.Session.add(yacht)
         self.Session.commit()
 
-        # Create multiple routes for one yacht
         route1 = self.create_route_instance(yacht.id, description="Route 1")
         route2 = self.create_route_instance(yacht.id, description="Route 2")
         
@@ -142,7 +139,6 @@ class TestRoute(DatabaseTest):
         self.assertIn("Shallow Water", obstacle_descriptions)
         self.assertIn("Navigation Mark", obstacle_descriptions)
 
-    # Helper methods
     def create_yacht_instance(self) -> Yacht:
         return Yacht(
             name="Test Yacht",
@@ -204,14 +200,11 @@ class TestRoutePoint(DatabaseTest):
         self.Session.add(route_point)
         self.Session.commit()
 
-        # Test route relationship
         point_db = self.Session.query(RoutePoint).first()
         self.assertEqual(point_db.route.description, "Test Route")
-        
-        # Test weather vector relationship
+
         self.assertEqual(point_db.weather_vector.speed, 15.5)
 
-    # Helper methods
     def create_yacht_instance(self) -> Yacht:
         return Yacht(
             name="Test Yacht",
@@ -292,7 +285,6 @@ class TestWeatherForecast(DatabaseTest):
         self.assertEqual(len(point_db.weather_forecasts), 1)
         self.assertEqual(point_db.weather_forecasts[0].wind_speed, 12.0)
 
-    # Helper methods (reusing from previous tests)
     def create_yacht_instance(self) -> Yacht:
         return Yacht(
             name="Test Yacht",
@@ -388,7 +380,6 @@ class TestRouteSegments(DatabaseTest):
         self.assertEqual(segment_db.from_point_rel.seq_idx, 1)
         self.assertEqual(segment_db.to_point_rel.seq_idx, 2)
 
-        # Test reverse relationships
         route_db = self.Session.query(Route).first()
         self.assertEqual(len(route_db.route_segments), 1)
 
@@ -402,14 +393,12 @@ class TestRouteSegments(DatabaseTest):
         self.Session.add(route)
         self.Session.commit()
 
-        # Create 3 points for 2 segments
         point1 = self.create_route_point_instance(route.id, weather_vector.id, seq_idx=1)
         point2 = self.create_route_point_instance(route.id, weather_vector.id, seq_idx=2)
         point3 = self.create_route_point_instance(route.id, weather_vector.id, seq_idx=3)
         self.Session.add_all([point1, point2, point3])
         self.Session.commit()
 
-        # Create 2 segments
         segment1 = self.create_route_segment_instance(route.id, point1.id, point2.id, segment_order=1)
         segment2 = self.create_route_segment_instance(route.id, point2.id, point3.id, segment_order=2)
         self.Session.add_all([segment1, segment2])
@@ -417,13 +406,11 @@ class TestRouteSegments(DatabaseTest):
 
         route_db = self.Session.query(Route).first()
         self.assertEqual(len(route_db.route_segments), 2)
-        
-        # Check segment order
+
         segments_ordered = sorted(route_db.route_segments, key=lambda s: s.segment_order)
         self.assertEqual(segments_ordered[0].segment_order, 1)
         self.assertEqual(segments_ordered[1].segment_order, 2)
 
-    # Helper methods
     def create_yacht_instance(self) -> Yacht:
         return Yacht(
             name="Test Yacht",
@@ -449,7 +436,7 @@ class TestRouteSegments(DatabaseTest):
         return RoutePoint(
             route_id=route_id,
             seq_idx=seq_idx,
-            x=18.6466 + (seq_idx * 0.01),  # Slightly different coordinates
+            x=18.6466 + (seq_idx * 0.01),
             y=54.3520 + (seq_idx * 0.01),
             weather_vector_id=weather_vector_id
         )
@@ -510,7 +497,6 @@ class TestControlPoint(DatabaseTest):
         self.assertEqual(len(route_db.control_points_rel), 1)
         self.assertEqual(route_db.control_points_rel[0].name, "Start Buoy")
 
-    # Helper methods
     def create_yacht_instance(self) -> Yacht:
         return Yacht(
             name="Test Yacht",
@@ -538,7 +524,6 @@ class TestControlPoint(DatabaseTest):
         )
 
 
-# Pytest fixtures for integration testing
 @pytest.fixture
 def db_session():
     """Create a test database session"""
@@ -580,16 +565,13 @@ def sample_route(db_session, sample_yacht):
     return route
 
 
-# Example pytest test using fixtures
 def test_complex_route_with_fixtures(db_session, sample_yacht, sample_route):
     """Test creating a complex route with multiple components using fixtures"""
-    
-    # Create weather vector
+
     weather_vector = WeatherVector(dir=270.0, speed=15.5)
     db_session.add(weather_vector)
     db_session.commit()
-    
-    # Create route points
+
     point1 = RoutePoint(
         route_id=sample_route.id,
         seq_idx=1,
@@ -606,8 +588,7 @@ def test_complex_route_with_fixtures(db_session, sample_yacht, sample_route):
     )
     db_session.add_all([point1, point2])
     db_session.commit()
-    
-    # Create segment
+
     segment = RouteSegments(
         route_id=sample_route.id,
         from_point=point1.id,
@@ -617,8 +598,7 @@ def test_complex_route_with_fixtures(db_session, sample_yacht, sample_route):
     )
     db_session.add(segment)
     db_session.commit()
-    
-    # Verify the complete structure
+
     route_db = db_session.query(Route).filter_by(id=sample_route.id).first()
     assert len(route_db.route_points) == 2
     assert len(route_db.route_segments) == 1
