@@ -63,7 +63,7 @@ async def create_route_and_mesh(session: AsyncSession, payload: CreateRouteAndMe
         radii_m=[payload.ring1_m, payload.ring2_m, payload.ring3_m],
         max_area_m2=[payload.area1, payload.area2, payload.area3],
     )
-    mesh = triangulate_water(water_xy, route_xy, zones)
+    mesh = triangulate_water(water_xy, route_xy, zones, shoreline_avoid_m = payload.shoreline_avoid_m)
     nodes = mesh.get("vertices", [])
     tris = mesh.get("triangles", [])
     if nodes is None or tris is None or len(nodes) == 0:

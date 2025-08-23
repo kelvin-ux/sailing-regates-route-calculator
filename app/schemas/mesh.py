@@ -18,6 +18,7 @@ class CreateRouteAndMeshIn(BaseModel):
     area1: float = 3000.0
     area2: float = 15000.0
     area3: float = 60000.0
+    shoreline_avoid_m : float = 300.0
 
 class CreateRouteAndMeshOut(BaseModel):
     route_id: UUID4

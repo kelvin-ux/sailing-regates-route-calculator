@@ -214,14 +214,21 @@ def _triangulate_geom(geom: shp.base.BaseGeometry, max_area: float) -> Dict[str,
 
 def triangulate_water(water_xy: shp.base.BaseGeometry,
                       route_xy: LineString,
-                      zones: MeshZones) -> Dict[str, Any]:
-    """
-    Trianguluje akwen (Polygon/MultiPolygon) z gęstością zależną od odległości od trasy.
-    Strefy: near (<=r1), mid (r1..r2), far (>r2). Zwraca {"vertices": Nx2, "triangles": Mx3}.
-    """
+                      zones: MeshZones,
+                      shoreline_avoid_m: float = 0.0) -> Dict[str, Any]:
     g = _valid_geom(water_xy)
     if g is None or g.is_empty:
         return {"vertices": np.zeros((0, 2)), "triangles": np.zeros((0, 3), dtype=int)}
+
+    if shoreline_avoid_m and shoreline_avoid_m > 0:
+        try:
+            shaved = _valid_geom(g.buffer(-float(shoreline_avoid_m)))
+            if shaved is None or shaved.is_empty:
+                shaved = _valid_geom(g.buffer(-float(shoreline_avoid_m) * 0.5))
+            if shaved is not None and not shaved.is_empty:
+                g = shaved
+        except Exception:
+            pass
 
     r1, r2, _ = zones.radii_m
     a1, a2, a3 = zones.max_area_m2
@@ -230,16 +237,15 @@ def triangulate_water(water_xy: shp.base.BaseGeometry,
     B2 = route_xy.buffer(r2, cap_style=2, join_style=2)
 
     near = _valid_geom(g.intersection(B1))
-    mid = _valid_geom(g.intersection(B2.difference(B1)))
-    far = _valid_geom(g.difference(B2))
+    mid  = _valid_geom(g.intersection(B2.difference(B1)))
+    far  = _valid_geom(g.difference(B2))
 
-    parts: List[Tuple[np.ndarray, np.ndarray]] = []
-
+    parts = []
     for geom, area in ((near, a1), (mid, a2), (far, a3)):
         if geom is None or geom.is_empty:
             continue
         mesh = _triangulate_geom(geom, max_area=area)
-        V = np.asarray(mesh["vertices"]); T = np.asarray(mesh["triangles"], dtype=int)
+        V, T = np.asarray(mesh["vertices"]), np.asarray(mesh["triangles"], dtype=int)
         if V.size == 0 or T.size == 0:
             continue
         parts.append((V, T))
@@ -247,14 +253,7 @@ def triangulate_water(water_xy: shp.base.BaseGeometry,
     if not parts:
         return {"vertices": np.zeros((0, 2)), "triangles": np.zeros((0, 3), dtype=int)}
 
-    Vs: List[np.ndarray] = []
-    Ts: List[np.ndarray] = []
-    offset = 0
+    Vs, Ts, offset = [], [], 0
     for V, T in parts:
-        Vs.append(V)
-        Ts.append(T + offset)
-        offset += V.shape[0]
-
-    Vout = np.vstack(Vs) if Vs else np.zeros((0, 2))
-    Tout = np.vstack(Ts) if Ts else np.zeros((0, 3), dtype=int)
-    return {"vertices": Vout, "triangles": Tout}
+        Vs.append(V); Ts.append(T + offset); offset += V.shape[0]
+    return {"vertices": np.vstack(Vs), "triangles": np.vstack(Ts)}
