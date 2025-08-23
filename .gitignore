@@ -212,5 +212,6 @@ sailingregates/
 .idea/
 database.db
 .DS_Store
-.data/geodata/
-.data/natural_earth/
+data/geodata/
+data/natural_earth/
+/data/geodata/
