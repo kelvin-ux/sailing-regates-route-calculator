@@ -239,6 +239,29 @@ class RouteSegments(Base):
         back_populates="segments_to"
     )
 
+from sqlalchemy import DateTime, ForeignKey, Integer, Text
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from uuid import uuid4, UUID
+from datetime import datetime
+
+class MeshedArea(Base):
+    __tablename__ = "meshed_area"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    route_id: Mapped[UUID] = mapped_column(ForeignKey("route.id"), nullable=False)
+    crs_epsg: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    nodes_json: Mapped[str] = mapped_column(Text, nullable=False, comment="[[x,y],...] w lokalnym CRS (metry)")
+    triangles_json: Mapped[str] = mapped_column(Text, nullable=False, comment="[[i,j,k],...] indeksy węzłów")
+
+    water_wkt: Mapped[str] = mapped_column(Text, nullable=False)
+    route_wkt: Mapped[str] = mapped_column(Text, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    route: Mapped["Route"] = relationship("Route", backref="meshed_areas")
+
 
 Index('idx_route_yacht_id', Route.yacht_id)
 Index('idx_route_point_route_id', RoutePoint.route_id)
