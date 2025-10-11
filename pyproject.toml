@@ -25,6 +25,7 @@ triangle = "*"
 requests = "*"
 rtree = "*"
 matplotlib = "^3.9"
+rasterio = "*"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.6.3"
