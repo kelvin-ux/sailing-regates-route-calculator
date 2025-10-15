@@ -258,6 +258,12 @@ class MeshedArea(Base):
     water_wkt: Mapped[str] = mapped_column(Text, nullable=False)
     route_wkt: Mapped[str] = mapped_column(Text, nullable=False)
 
+    weather_data_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=True,
+        comment="JSON with weather data for mesh points"
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     route: Mapped["Route"] = relationship("Route", backref="meshed_areas")

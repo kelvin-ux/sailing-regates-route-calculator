@@ -1,114 +1,28 @@
+from __future__ import annotations
+
 import asyncio
 import time
 from typing import List, Dict, Optional, Tuple
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import aiohttp
 from collections import deque
 import redis.asyncio as redis
 import json
 
-
-# TODO dodac rowniez implementacje openmeteo-requests dla fal etc.. // jezeli mozliwe to calkowicie przerzucic sie na tamto api
-
-@dataclass
-class WeatherRequest:
-    lat: float
-    lon: float
-    request_id: str
-    priority: int = 0  # 0=normal, 1=high priority (control points)
-    timestamp: datetime = field(default_factory=datetime.now)
-
-    def cache_key(self, grid_size: float = 0.01) -> str:
-        """Generuje klucz cache na podstawie gridu geograficznego"""
-        grid_lat = round(self.lat / grid_size) * grid_size
-        grid_lon = round(self.lon / grid_size) * grid_size
-        return f"weather:{grid_lat:.2f}:{grid_lon:.2f}"
+from app.schemas.weather import MarineWeatherRequest
+from app.services.weather.WeatherCache import WeatherCache
+from app.services.weather.RateLimiter import RateLimiter
 
 
-class RateLimiter:
-    def __init__(self, max_calls: int = 60, period: int = 60):
-        self.max_calls = max_calls
-        self.period = period
-        self.calls = deque()
-        self._lock = asyncio.Lock()
-
-    async def acquire(self):
-        async with self._lock:
-            now = time.time()
-            while self.calls and self.calls[0] < now - self.period:
-                self.calls.popleft()
-
-            if len(self.calls) >= self.max_calls:
-                sleep_time = self.period - (now - self.calls[0]) + 0.1
-                await asyncio.sleep(sleep_time)
-                return await self.acquire()
-
-            self.calls.append(now)
-
-    async def __aenter__(self):
-        await self.acquire()
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        pass
-
-
-class WeatherCache:
-    def __init__(self, redis_client: Optional[redis.Redis] = None, ttl: int = 3600):
-        self.redis = redis_client
-        self.ttl = ttl
-        self.memory_cache = {}
-
-    async def get(self, key: str) -> Optional[Dict]:
-        if self.redis:
-            try:
-                data = await self.redis.get(key)
-                if data:
-                    return json.loads(data)
-            except Exception as e:
-                print(f"Redis error: {e}")
-
-        if key in self.memory_cache:
-            cached = self.memory_cache[key]
-            if cached['expires'] > datetime.now():
-                return cached['data']
-
-        return None
-
-    async def set(self, key: str, data: Dict):
-        if self.redis:
-            try:
-                await self.redis.setex(
-                    key,
-                    self.ttl,
-                    json.dumps(data)
-                )
-            except Exception as e:
-                print(f"Redis error: {e}")
-
-        self.memory_cache[key] = {
-            'data': data,
-            'expires': datetime.now() + timedelta(seconds=self.ttl)
-        }
-
-        if len(self.memory_cache) > 1000:
-            now = datetime.now()
-            self.memory_cache = {
-                k: v for k, v in self.memory_cache.items()
-                if v['expires'] > now
-            }
-
-
-class WeatherAPIManager:
+class OpenMeteoService:
     def __init__(self,
-                 api_key: str,
                  redis_url: Optional[str] = None,
-                 max_calls_per_minute: int = 55,
+                 max_calls_per_minute: int = 500,
                  cache_ttl: int = 3600):
 
-        self.api_key = api_key
-        self.base_url = "https://api.openweathermap.org/data/2.5"
+        self.base_url = "https://api.open-meteo.com/v1"
+        self.marine_url = "https://marine-api.open-meteo.com/v1/marine"
+
         self.rate_limiter = RateLimiter(max_calls=max_calls_per_minute, period=60)
 
         self.redis_client = None
@@ -120,9 +34,6 @@ class WeatherAPIManager:
 
         self.cache = WeatherCache(self.redis_client, ttl=cache_ttl)
 
-        self.request_queue: asyncio.Queue = asyncio.Queue()
-        self.results: Dict[str, Dict] = {}
-
         self.stats = {
             'total_requests': 0,
             'cache_hits': 0,
@@ -130,8 +41,10 @@ class WeatherAPIManager:
             'errors': 0
         }
 
-    async def fetch_weather(self, lat: float, lon: float) -> Dict:
-        request = WeatherRequest(lat=lat, lon=lon, request_id=f"{lat}:{lon}")
+    async def fetch_marine_weather(self, lat: float, lon: float) -> Dict:
+        self.stats['total_requests'] += 1
+
+        request = MarineWeatherRequest(lat=lat, lon=lon, request_id=f"{lat}:{lon}")
         cache_key = request.cache_key()
 
         cached = await self.cache.get(cache_key)
@@ -142,93 +55,158 @@ class WeatherAPIManager:
         async with self.rate_limiter:
             self.stats['api_calls'] += 1
 
-            async with aiohttp.ClientSession() as session:
-                params = {
-                    'lat': lat,
-                    'lon': lon,
-                    'appid': self.api_key,
-                    'units': 'metric'
-                }
+            try:
+                weather_data = await self._fetch_from_api(lat, lon)
+                await self.cache.set(cache_key, weather_data)
+                return weather_data
 
-                try:
-                    async with session.get(
-                            f"{self.base_url}/weather",
-                            params=params,
-                            timeout=10
-                    ) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            weather_data = {
-                                'wind_speed': data['wind']['speed'],
-                                'wind_dir': data['wind']['deg'],
-                                'temp': data['main']['temp'],
-                                'pressure': data['main']['pressure'],
-                                'humidity': data['main']['humidity'],
-                                'description': data['weather'][0]['description'],
-                                'timestamp': datetime.now().isoformat()
-                            }
+            except Exception as e:
+                print(f"Open-Meteo API error: {e}")
+                self.stats['errors'] += 1
+                return self._default_marine_weather()
 
-                            await self.cache.set(cache_key, weather_data)
-                            return weather_data
-                        else:
-                            self.stats['errors'] += 1
-                            return self._default_weather()
+    async def _fetch_from_api(self, lat: float, lon: float) -> Dict:
 
-                except asyncio.TimeoutError:
-                    self.stats['errors'] += 1
-                    return self._default_weather()
-                except Exception as e:
-                    print(f"Weather API error: {e}")
-                    self.stats['errors'] += 1
-                    return self._default_weather()
+        async with aiohttp.ClientSession() as session:
+            marine_params = {
+                'latitude': lat,
+                'longitude': lon,
+                'current': ','.join([
+                    'wave_height',
+                    'wave_direction',
+                    'wave_period',
+                    'wind_wave_height',
+                    'wind_wave_direction',
+                    'wind_wave_period',
+                    'swell_wave_height',
+                    'swell_wave_direction',
+                    'swell_wave_period',
+                    'ocean_current_velocity',
+                    'ocean_current_direction'
+                ]),
+                'timezone': 'auto'
+            }
 
-    def _default_weather(self) -> Dict:
+            weather_params = {
+                'latitude': lat,
+                'longitude': lon,
+                'current': ','.join([
+                    'temperature_2m',
+                    'relative_humidity_2m',
+                    'pressure_msl',
+                    'wind_speed_10m',
+                    'wind_direction_10m',
+                    'wind_gusts_10m'
+                ]),
+                'timezone': 'auto'
+            }
+
+            marine_task = session.get(self.marine_url, params=marine_params, timeout=10)
+            weather_task = session.get(f"{self.base_url}/forecast", params=weather_params, timeout=10)
+
+            marine_response, weather_response = await asyncio.gather(
+                marine_task, weather_task, return_exceptions=True
+            )
+
+            marine_data = {}
+            weather_data = {}
+
+            if isinstance(marine_response, aiohttp.ClientResponse) and marine_response.status == 200:
+                marine_json = await marine_response.json()
+                if 'current' in marine_json:
+                    marine_data = marine_json['current']
+
+            if isinstance(weather_response, aiohttp.ClientResponse) and weather_response.status == 200:
+                weather_json = await weather_response.json()
+                if 'current' in weather_json:
+                    weather_data = weather_json['current']
+
+            return {
+                'wind_speed': weather_data.get('wind_speed_10m', 5.0),
+                'wind_direction': weather_data.get('wind_direction_10m', 0.0),
+                'wind_gusts': weather_data.get('wind_gusts_10m', 7.0),
+
+                'wave_height': marine_data.get('wave_height', 0.5),
+                'wave_direction': marine_data.get('wave_direction', 0.0),
+                'wave_period': marine_data.get('wave_period', 4.0),
+
+                'wind_wave_height': marine_data.get('wind_wave_height', 0.3),
+                'wind_wave_direction': marine_data.get('wind_wave_direction', 0.0),
+                'wind_wave_period': marine_data.get('wind_wave_period', 3.0),
+
+                'swell_wave_height': marine_data.get('swell_wave_height', 0.2),
+                'swell_wave_direction': marine_data.get('swell_wave_direction', 0.0),
+                'swell_wave_period': marine_data.get('swell_wave_period', 6.0),
+
+                'current_velocity': marine_data.get('ocean_current_velocity', 0.1),
+                'current_direction': marine_data.get('ocean_current_direction', 0.0),
+
+                'temperature': weather_data.get('temperature_2m', 15.0),
+                'humidity': weather_data.get('relative_humidity_2m', 70.0),
+                'pressure': weather_data.get('pressure_msl', 1013.0),
+
+                'timestamp': datetime.now().isoformat(),
+                'coords': {'lat': lat, 'lon': lon},
+                'source': 'open-meteo'
+            }
+
+    def _default_marine_weather(self) -> Dict:
         return {
             'wind_speed': 5.0,
-            'wind_dir': 0.0,
-            'temp': 15.0,
-            'pressure': 1013.0,
+            'wind_direction': 0.0,
+            'wind_gusts': 7.0,
+            'wave_height': 0.5,
+            'wave_direction': 0.0,
+            'wave_period': 4.0,
+            'wind_wave_height': 0.3,
+            'wind_wave_direction': 0.0,
+            'wind_wave_period': 3.0,
+            'swell_wave_height': 0.2,
+            'swell_wave_direction': 0.0,
+            'swell_wave_period': 6.0,
+            'current_velocity': 0.1,
+            'current_direction': 0.0,
+            'temperature': 15.0,
             'humidity': 70.0,
-            'description': 'failed to get data, standard data applied',
+            'pressure': 1013.0,
             'timestamp': datetime.now().isoformat(),
-            'is_default': True
+            'is_default': True,
+            'source': 'default'
         }
 
     async def fetch_batch(self,
                           points: List[Tuple[float, float]],
-                          priorities: Optional[List[int]] = None) -> Dict[Tuple[float, float], Dict]:
+                          priorities: Optional[List[int]] = None) -> Dict[int, Dict]:
         if not priorities:
             priorities = [0] * len(points)
 
         sorted_points = sorted(
-            zip(points, priorities),
-            key=lambda x: x[1],
+            enumerate(zip(points, priorities)),
+            key=lambda x: x[1][1],
             reverse=True
         )
 
         results = {}
-        tasks = []
 
         batch_size = 10
         for i in range(0, len(sorted_points), batch_size):
             batch = sorted_points[i:i + batch_size]
 
-            for (lat, lon), _ in batch:
-                task = self.fetch_weather(lat, lon)
-                tasks.append((lat, lon, task))
+            tasks = []
+            for idx, ((lat, lon), priority) in batch:
+                task = self.fetch_marine_weather(lat, lon)
+                tasks.append((idx, task))
 
-            for lat, lon, task in tasks:
+            for idx, task in tasks:
                 try:
                     result = await task
-                    results[(lat, lon)] = result
+                    results[idx] = result
                 except Exception as e:
-                    print(f"Failed to fetch weather for ({lat}, {lon}): {e}")
-                    results[(lat, lon)] = self._default_weather()
-
-            tasks.clear()
+                    print(f"Failed to fetch weather for point {idx}: {e}")
+                    results[idx] = self._default_marine_weather()
 
             if i + batch_size < len(sorted_points):
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.2)
 
         return results
 
@@ -236,7 +214,7 @@ class WeatherAPIManager:
                              lat: float,
                              lon: float,
                              hours: int = 48) -> List[Dict]:
-        cache_key = f"forecast:{lat:.2f}:{lon:.2f}:{hours}"
+        cache_key = f"forecast:marine:{lat:.2f}:{lon:.2f}:{hours}"
 
         cached = await self.cache.get(cache_key)
         if cached:
@@ -246,42 +224,56 @@ class WeatherAPIManager:
         async with self.rate_limiter:
             self.stats['api_calls'] += 1
 
-            async with aiohttp.ClientSession() as session:
-                params = {
-                    'lat': lat,
-                    'lon': lon,
-                    'appid': self.api_key,
-                    'units': 'metric',
-                    'cnt': hours // 3
-                }
+            try:
+                async with aiohttp.ClientSession() as session:
+                    params = {
+                        'latitude': lat,
+                        'longitude': lon,
+                        'hourly': ','.join([
+                            'wave_height',
+                            'wave_direction',
+                            'wave_period',
+                            'wind_speed_10m',
+                            'wind_direction_10m',
+                            'temperature_2m',
+                            'pressure_msl'
+                        ]),
+                        'forecast_hours': min(hours, 168),
+                        'timezone': 'auto'
+                    }
 
-                try:
                     async with session.get(
-                            f"{self.base_url}/forecast",
+                            self.marine_url,
                             params=params,
-                            timeout=10
+                            timeout=15
                     ) as response:
                         if response.status == 200:
                             data = await response.json()
 
                             forecast = []
-                            for item in data['list']:
-                                forecast.append({
-                                    'timestamp': item['dt_txt'],
-                                    'wind_speed': item['wind']['speed'],
-                                    'wind_dir': item['wind']['deg'],
-                                    'temp': item['main']['temp'],
-                                    'pressure': item['main']['pressure'],
-                                    'humidity': item['main']['humidity'],
-                                    'description': item['weather'][0]['description']
-                                })
+                            if 'hourly' in data:
+                                hourly = data['hourly']
+                                times = hourly.get('time', [])
+
+                                for i, timestamp in enumerate(times[:hours]):
+                                    forecast.append({
+                                        'timestamp': timestamp,
+                                        'wave_height': hourly.get('wave_height', [None])[i],
+                                        'wave_direction': hourly.get('wave_direction', [None])[i],
+                                        'wave_period': hourly.get('wave_period', [None])[i],
+                                        'wind_speed': hourly.get('wind_speed_10m', [None])[i],
+                                        'wind_direction': hourly.get('wind_direction_10m', [None])[i],
+                                        'temperature': hourly.get('temperature_2m', [None])[i],
+                                        'pressure': hourly.get('pressure_msl', [None])[i]
+                                    })
 
                             await self.cache.set(cache_key, forecast)
                             return forecast
 
-                except Exception as e:
-                    print(f"Forecast API error: {e}")
-                    return []
+            except Exception as e:
+                print(f"Forecast API error: {e}")
+                self.stats['errors'] += 1
+                return []
 
     def get_stats(self) -> Dict:
         total = self.stats['cache_hits'] + self.stats['api_calls']
@@ -293,27 +285,6 @@ class WeatherAPIManager:
             'remaining_calls': self.rate_limiter.max_calls - len(self.rate_limiter.calls)
         }
 
-
-class WeatherBatchProcessor:
-    def __init__(self, api_manager: WeatherAPIManager):
-        self.api_manager = api_manager
-        self.processing = False
-
-    async def process_mesh_points(self,weather_points: List[Tuple[float, float]],) -> Dict[int, Dict]:
-        print(f"Processing {len(weather_points)} weather points...")
-
-        priorities = [max(0, len(weather_points) - i) for i in range(len(weather_points))]
-
-        weather_data = await self.api_manager.fetch_batch(weather_points, priorities)
-
-        indexed_data = {}
-        for idx, (lat, lon) in enumerate(weather_points):
-            if (lat, lon) in weather_data:
-                indexed_data[idx] = weather_data[(lat, lon)]
-            else:
-                indexed_data[idx] = self.api_manager._default_weather()
-
-        print(f"Weather fetch complete. Stats: {self.api_manager.get_stats()}")
-
-        return indexed_data
-
+    async def close(self):
+        if self.redis_client:
+            await self.redis_client.close()

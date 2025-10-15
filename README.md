@@ -6,9 +6,9 @@
 - fix database integrations 
 - fix map visualisation endpoint
 - improve map trimming 
-- change weather api provider 
 - clean up repo 
 - create unit and integrations tests for meshing stage 
+- connect navi points with batometry map 
 
 # Sailing Route Optimizer
 
