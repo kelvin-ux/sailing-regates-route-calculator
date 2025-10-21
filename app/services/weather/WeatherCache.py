@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-
-import asyncio
-import time
-from typing import List, Dict, Optional, Tuple
-from datetime import datetime, timedelta
-import aiohttp
-from collections import deque
-import redis.asyncio as redis
 import json
+import redis.asyncio as redis
 
-from app.schemas.weather import MarineWeatherRequest
+from typing import Dict
+from typing import Optional
+from datetime import datetime
+from datetime import timedelta
+
 
 class WeatherCache:
     """Cache for weather data with Redis and in-memory fallback"""
@@ -28,7 +25,6 @@ class WeatherCache:
             except Exception as e:
                 print(f"Redis error: {e}")
 
-        # Fallback to memory cache
         if key in self.memory_cache:
             cached = self.memory_cache[key]
             if cached['expires'] > datetime.now():

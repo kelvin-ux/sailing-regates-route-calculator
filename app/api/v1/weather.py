@@ -1,26 +1,33 @@
 from __future__ import annotations
 
 import json
-from typing import List, Optional
-from uuid import UUID
-
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, UUID4
-from pyproj import Transformer
-from sqlalchemy.ext.asyncio import AsyncSession
 import numpy as np
+from typing import Optional
+from typing import List
+from datetime import datetime
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from pyproj import Transformer
+
+from fastapi import APIRouter
+from fastapi import Depends
+from fastapi import HTTPException
+from fastapi import Query
+from pydantic import UUID4
 
 from app.core.database import get_db as get_async_session
+from app.models.models import RoutePointType
 from app.services.db.services import MeshedAreaService
-from app.services.weather.weather_api_manager import OpenMeteoService
+from app.services.db.services import RoutePointService
+from app.services.db.services import WeatherForecastService
+from app.schemas.db_create import WeatherForecastCreate
+from app.schemas.db_create import RoutePointCreate
 
-from app.schemas.weather import (
-    WeatherBatchResponse, WeatherPointResponse,
-    WeatherPointResponse, WeatherDataResponse
-)
+from app.services.weather.weather_api_manager import OpenMeteoService
+from app.schemas.weather import WeatherBatchResponse
+from app.schemas.weather import WeatherPointResponse
 
 router = APIRouter()
-
 
 _weather_service: Optional[OpenMeteoService] = None
 
@@ -30,11 +37,12 @@ def get_weather_service() -> OpenMeteoService:
     global _weather_service
     if _weather_service is None:
         _weather_service = OpenMeteoService(
-            redis_url=None, # "redis://localhost:6379"
+            redis_url=None,  # "redis://localhost:6379"
             max_calls_per_minute=500,
             cache_ttl=3600  # 1 hour cache
         )
     return _weather_service
+
 
 @router.post("/{meshed_area_id}/fetch-weather",
              response_model=WeatherBatchResponse,
@@ -42,21 +50,31 @@ def get_weather_service() -> OpenMeteoService:
              description="Fetch current marine weather data for weather points")
 async def fetch_weather_for_mesh(
         meshed_area_id: UUID4,
-        force_refresh: bool = Query(False, description="Force refresh from API, bypass cache"),
+        save_to_db: bool = Query(True, description="Save weather data to database"),
         session: AsyncSession = Depends(get_async_session),
         service: OpenMeteoService = Depends(get_weather_service)
 ):
     """
-    Fetch current weather data for all weather points in the mesh.
+    Fetch current weather data for all weather points.
     """
     try:
         mesh_svc = MeshedAreaService(session)
+        rpoint_svc = RoutePointService(session)
+        wf_svc = WeatherForecastService(session)
+
         meshed = await mesh_svc.get_entity_by_id(meshed_area_id, allow_none=False)
 
         if not meshed:
             raise HTTPException(404, f"MeshedArea {meshed_area_id} not found")
 
-        weather_points = await _extract_weather_points(meshed)
+        weather_points_data = {}
+        if meshed.weather_points_json:
+            weather_points_data = json.loads(meshed.weather_points_json)
+
+        if not weather_points_data:
+            weather_points = await _extract_weather_points(meshed)
+        else:
+            weather_points = [(p['x'], p['y']) for p in weather_points_data.get('points', [])]
 
         if not weather_points:
             raise HTTPException(400, "No weather points found for this mesh")
@@ -70,6 +88,32 @@ async def fetch_weather_for_mesh(
         else:
             weather_points_wgs84 = weather_points
 
+        existing_weather_points = await rpoint_svc.get_all_entities(
+            filters={
+                'meshed_area_id': meshed_area_id,
+                'point_type': RoutePointType.WEATHER
+            },
+            page=1,
+            limit=1000
+        )
+
+        weather_point_ids = []
+        if not existing_weather_points or len(existing_weather_points) == 0:
+            for idx, (lon, lat) in enumerate(weather_points_wgs84):
+                rp = await rpoint_svc.create_entity(
+                    model_data=RoutePointCreate(
+                        route_id=meshed.route_id,
+                        meshed_area_id=meshed_area_id,
+                        point_type=RoutePointType.WEATHER,
+                        seq_idx=1000 + idx,
+                        x=lon,
+                        y=lat
+                    )
+                )
+                weather_point_ids.append(rp.id)
+        else:
+            weather_point_ids = [p.id for p in existing_weather_points]
+
         initial_stats = service.get_stats()
 
         weather_data = await service.fetch_batch(
@@ -82,6 +126,7 @@ async def fetch_weather_for_mesh(
         response_points = []
         successful = 0
         failed = 0
+        current_time = datetime.utcnow()
 
         for idx, data in weather_data.items():
             lon, lat = weather_points_wgs84[idx]
@@ -91,6 +136,29 @@ async def fetch_weather_for_mesh(
                 failed += 1
             else:
                 successful += 1
+
+            if save_to_db and idx < len(weather_point_ids):
+                weather_forecast = await wf_svc.create_entity(
+                    model_data=WeatherForecastCreate(
+                        route_point_id=weather_point_ids[idx],
+                        forecast_timestamp=current_time,
+                        temperature=data.get('temperature'),
+                        humidity=data.get('humidity'),
+                        pressure=data.get('pressure'),
+                        wind_speed=data.get('wind_speed', 0.0),
+                        wind_direction=data.get('wind_direction', 0.0),
+                        wind_gusts=data.get('wind_gusts'),
+                        wave_height=data.get('wave_height'),
+                        wave_direction=data.get('wave_direction'),
+                        wave_period=data.get('wave_period'),
+                        wind_wave_height=data.get('wind_wave_height'),
+                        swell_wave_height=data.get('swell_wave_height'),
+                        current_velocity=data.get('current_velocity'),
+                        current_direction=data.get('current_direction'),
+                        source=data.get('source', 'open-meteo'),
+                        is_default=is_default
+                    )
+                )
 
             response_points.append(WeatherPointResponse(
                 index=idx,
@@ -113,29 +181,22 @@ async def fetch_weather_for_mesh(
                 is_default=is_default
             ))
 
-        # TODO  - database
-        weather_json = {
-            str(idx): {
-                'coords': {'lat': p.lat, 'lon': p.lon},
-                'wind_speed': p.wind_speed,
-                'wind_direction': p.wind_direction,
-                'wind_gusts': p.wind_gusts,
-                'wave_height': p.wave_height,
-                'wave_direction': p.wave_direction,
-                'wave_period': p.wave_period,
-                'wind_wave_height': p.wind_wave_height,
-                'swell_wave_height': p.swell_wave_height,
-                'current_velocity': p.current_velocity,
-                'current_direction': p.current_direction,
-                'temperature': p.temperature,
-                'humidity': p.humidity,
-                'pressure': p.pressure,
-                'timestamp': p.timestamp
-            }
-            for idx, p in enumerate(response_points)
+        weather_points_metadata = {
+            'points': [
+                {
+                    'idx': idx,
+                    'x': weather_points[idx][0],
+                    'y': weather_points[idx][1],
+                    'lon': weather_points_wgs84[idx][0],
+                    'lat': weather_points_wgs84[idx][1],
+                    'route_point_id': str(weather_point_ids[idx]) if idx < len(weather_point_ids) else None
+                }
+                for idx in range(len(weather_points))
+            ],
+            'last_updated': current_time.isoformat()
         }
 
-        meshed.weather_data_json = json.dumps(weather_json)
+        meshed.weather_points_json = json.dumps(weather_points_metadata)
         await session.commit()
 
         return WeatherBatchResponse(
@@ -151,121 +212,96 @@ async def fetch_weather_for_mesh(
     except HTTPException:
         raise
     except Exception as e:
+        await session.rollback()
         raise HTTPException(500, f"Failed to fetch weather: {str(e)}")
 
 
-@router.get("/{meshed_area_id}/weather-data",
-            response_model=WeatherDataResponse,
+@router.get("/{meshed_area_id}/weather-history",
             status_code=200,
-            description="Get stored weather data")
-async def get_weather_data(
+            description="Get historical weather data from database")
+async def get_weather_history(
         meshed_area_id: UUID4,
+        hours: int = Query(24, description="Number of hours to look back"),
         session: AsyncSession = Depends(get_async_session)
 ):
     """
-    Get stored weather data for the mesh.
-
-    Returns the last fetched weather data without making new API calls.
+    Get historical weather data from WeatherForecast.
     """
     try:
+        from datetime import timedelta
+        from sqlalchemy import select, and_
+        from app.models.models import RoutePoint, WeatherForecast
+
         mesh_svc = MeshedAreaService(session)
         meshed = await mesh_svc.get_entity_by_id(meshed_area_id, allow_none=False)
 
         if not meshed:
             raise HTTPException(404, f"MeshedArea {meshed_area_id} not found")
 
-        weather_data = {}
-        if hasattr(meshed, 'weather_data_json') and meshed.weather_data_json:
-            weather_data = json.loads(meshed.weather_data_json)
+        end_time = datetime.utcnow()
+        start_time = end_time - timedelta(hours=hours)
 
-        return WeatherDataResponse(
-            meshed_area_id=str(meshed_area_id),
-            has_data=bool(weather_data),
-            point_count=len(weather_data),
-            data=weather_data
+        query = (
+            select(RoutePoint, WeatherForecast)
+            .join(WeatherForecast, RoutePoint.id == WeatherForecast.route_point_id)
+            .where(
+                and_(
+                    RoutePoint.meshed_area_id == meshed_area_id,
+                    RoutePoint.point_type == RoutePointType.WEATHER,
+                    WeatherForecast.forecast_timestamp >= start_time,
+                    WeatherForecast.forecast_timestamp <= end_time
+                )
+            )
+            .order_by(RoutePoint.seq_idx, WeatherForecast.forecast_timestamp.desc())
         )
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, f"Failed to get weather data: {str(e)}")
+        result = await session.execute(query)
+        rows = result.all()
 
-
-@router.get("/{meshed_area_id}/weather-geojson",
-            status_code=200,
-            description="Get weather data as GeoJSON for map visualization")
-async def get_weather_geojson(
-        meshed_area_id: UUID4,
-        session: AsyncSession = Depends(get_async_session)
-):
-    """
-    Get weather data as GeoJSON for map visualization.
-
-    Returns weather points with all marine data as GeoJSON Feature Collection.
-    """
-    try:
-        mesh_svc = MeshedAreaService(session)
-        meshed = await mesh_svc.get_entity_by_id(meshed_area_id, allow_none=False)
-
-        if not meshed:
-            raise HTTPException(404, f"MeshedArea {meshed_area_id} not found")
-
-        weather_data = {}
-        if hasattr(meshed, 'weather_data_json') and meshed.weather_data_json:
-            weather_data = json.loads(meshed.weather_data_json)
-
-        features = []
-        for idx, data in weather_data.items():
-            features.append({
-                "type": "Feature",
-                "properties": {
-                    "index": int(idx),
-                    "wind_speed": data.get("wind_speed"),
-                    "wind_direction": data.get("wind_direction"),
-                    "wind_gusts": data.get("wind_gusts"),
-                    "wave_height": data.get("wave_height"),
-                    "wave_direction": data.get("wave_direction"),
-                    "wave_period": data.get("wave_period"),
-                    "wind_wave_height": data.get("wind_wave_height"),
-                    "swell_wave_height": data.get("swell_wave_height"),
-                    "current_velocity": data.get("current_velocity"),
-                    "current_direction": data.get("current_direction"),
-                    "temperature": data.get("temperature"),
-                    "humidity": data.get("humidity"),
-                    "pressure": data.get("pressure"),
-                    "timestamp": data.get("timestamp")
-                },
-                "geometry": {
-                    "type": "Point",
-                    "coordinates": [
-                        data["coords"]["lon"],
-                        data["coords"]["lat"]
-                    ]
+        weather_history = {}
+        for point, forecast in rows:
+            point_key = f"{point.seq_idx}_{point.x:.4f}_{point.y:.4f}"
+            if point_key not in weather_history:
+                weather_history[point_key] = {
+                    "point_id": str(point.id),
+                    "lon": point.x,
+                    "lat": point.y,
+                    "seq_idx": point.seq_idx,
+                    "forecasts": []
                 }
+
+            weather_history[point_key]["forecasts"].append({
+                "forecast_id": str(forecast.id),
+                "timestamp": forecast.forecast_timestamp.isoformat(),
+                "fetched_at": forecast.fetched_timestamp.isoformat(),
+                "wind_speed": forecast.wind_speed,
+                "wind_direction": forecast.wind_direction,
+                "wind_gusts": forecast.wind_gusts,
+                "wave_height": forecast.wave_height,
+                "wave_direction": forecast.wave_direction,
+                "wave_period": forecast.wave_period,
+                "temperature": forecast.temperature,
+                "pressure": forecast.pressure,
+                "source": forecast.source,
+                "is_default": forecast.is_default
             })
 
         return {
-            "type": "FeatureCollection",
-            "features": features
+            "meshed_area_id": str(meshed_area_id),
+            "time_range": {
+                "start": start_time.isoformat(),
+                "end": end_time.isoformat(),
+                "hours": hours
+            },
+            "points_count": len(weather_history),
+            "total_forecasts": sum(len(p["forecasts"]) for p in weather_history.values()),
+            "weather_points": list(weather_history.values())
         }
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"Failed to generate GeoJSON: {str(e)}")
-
-
-@router.get("/service/stats",
-            status_code=200,
-            description="Get weather service statistics and performance metrics")
-async def get_service_stats(
-        service: OpenMeteoService = Depends(get_weather_service)
-):
-    """
-    Get weather service statistics.
-    """
-    return service.get_stats()
-
+        raise HTTPException(500, f"Failed to get weather history: {str(e)}")
 
 async def _extract_weather_points(meshed_area) -> List[tuple[float, float]]:
     """

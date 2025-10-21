@@ -1,10 +1,14 @@
 from __future__ import annotations
-from typing import Dict, List, Tuple, Optional
-import math, heapq
+import math
+import heapq
 import numpy as np
 
-from shapely.geometry import Point, LineString, Polygon, MultiPolygon
-from shapely.ops import nearest_points
+from typing import Dict
+from typing import List
+from typing import Tuple
+from typing import Optional
+
+from shapely.geometry import LineString
 from app.services.meshing.triangle_mesher import _triangulate_geom
 
 def _edge_ok(p: Tuple[float, float], q: Tuple[float, float], navigable) -> bool:
@@ -25,7 +29,7 @@ def _knn_indices(V: np.ndarray, pt: Tuple[float,float], k: int = 8) -> List[int]
 def _build_graph(V: np.ndarray, T: np.ndarray, navigable, fairway=None) -> Dict[int, List[Tuple[int,float]]]:
     """
     Graf sąsiedztwa po krawędziach trójkątów.
-    Jeśli fairway (LineString/MultiLineString) jest podany – krawędzie w jego pobliżu dostają
+    Jeśli fairway jest podany – krawędzie w jego pobliżu dostają
     mniejszą wagę (preferencja „idź torem wodnym”).
     """
     adj: Dict[int, List[Tuple[int,float]]] = {i: [] for i in range(V.shape[0])}
@@ -42,7 +46,7 @@ def _build_graph(V: np.ndarray, T: np.ndarray, navigable, fairway=None) -> Dict[
             if not _edge_ok(pu, pv, navigable):  # sanity
                 continue
             w = math.hypot(pu[0]-pv[0], pu[1]-pv[1])
-            # bonus za bliskość fairway (jeśli podany)
+            # bonus za bliskość fairway
             if fairway is not None:
                 try:
                     if LineString([pu,pv]).distance(fairway) < 80.0:  # ~80 m
@@ -83,7 +87,7 @@ def safe_polyline(navigable, start_xy: Tuple[float,float], end_xy: Tuple[float,f
                   coarse_area: float = 250000.0, fairway=None) -> Optional[LineString]:
     """
     Zwraca LineString „bezpiecznej łamanej” od start do meta, w CAŁOŚCI wewnątrz 'navigable'.
-    - trianguluje szybko 'navigable' (duże trójkąty),
+    - trianguluje szybko 'navigable',
     - buduje graf po krawędziach,
     - łączy start/meta z najbliższymi węzłami,
     - liczy najkrótszą ścieżkę.
@@ -97,7 +101,7 @@ def safe_polyline(navigable, start_xy: Tuple[float,float], end_xy: Tuple[float,f
     # graf
     adj = _build_graph(V, T, navigable, fairway=fairway)
 
-    # węzły start/meta – dołącz do grafu
+    # węzły start/meta
     s_idx = V.shape[0]; t_idx = V.shape[0] + 1
     Vext = np.vstack([V, [[start_xy[0], start_xy[1]], [end_xy[0], end_xy[1]]]])
     adj[s_idx] = []; adj[t_idx] = []
@@ -121,7 +125,6 @@ def safe_polyline(navigable, start_xy: Tuple[float,float], end_xy: Tuple[float,f
 
     coords = [(float(Vext[i,0]), float(Vext[i,1])) for i in path_idx]
     ls = LineString(coords)
-    # lekkie uproszczenie łamanej (w metrach)
     try:
         ls = ls.simplify(10.0, preserve_topology=False)
     except Exception:

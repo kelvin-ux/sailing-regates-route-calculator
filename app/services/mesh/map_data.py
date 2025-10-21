@@ -1,20 +1,21 @@
-# app/services/mesh/map_data.py
 from __future__ import annotations
 
 import json
-from typing import Dict, Any, List, Tuple
-
 import numpy as np
+
+from typing import Dict
+from typing import Any
+from typing import List
+from typing import Tuple
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from shapely import wkt
 from shapely.ops import transform as shp_transform
 from pyproj import Transformer
 
-from app.services.db.services import (
-    MeshedAreaService,
-    RoutePointService,
-    RouteService,
-)
+from app.services.db.services import MeshedAreaService
+from app.services.db.services import RoutePointService
+from app.services.db.services import RouteService
 
 async def build_map_geojson(session: AsyncSession, meshed_area_id: str) -> Dict[str, Any]:
     mesh_svc = MeshedAreaService(session)

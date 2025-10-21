@@ -1,30 +1,26 @@
-# app/services/meshing/triangle_mesher.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple, Dict, Any
+from typing import List
+from typing import Dict
+from typing import Any
 
 import numpy as np
 from shapely import geometry as shp
-from shapely.geometry import Polygon, MultiPolygon, LineString, LinearRing
-try:
-    # Shapely 2.x
-    from shapely.validation import make_valid as _make_valid
-except Exception:
-    _make_valid = None
+from shapely.geometry import Polygon
+from shapely.geometry import MultiPolygon
+from shapely.geometry import LineString
+from shapely.geometry import LinearRing
+from shapely.validation import make_valid as _make_valid
 
-import triangle as tr  # pip install triangle
+import triangle as tr
 
-
-# -------------------------------
-# Konfiguracja gęstości
-# -------------------------------
 
 @dataclass
 class MeshZones:
     """
     radii_m: [r1, r2, r3]  (metry od linii trasy: near, mid, far)
-    max_area_m2: [a1, a2, a3] (maks. powierzchnia trójkąta dla near/mid/far)
+    max_area_m2: [a1, a2, a3]
     """
     radii_m: List[float]
     max_area_m2: List[float]
@@ -40,16 +36,11 @@ class MeshZones:
             raise ValueError("max_area_m2 muszą być dodatnie i niemalejące (a1 <= a2 <= a3).")
 
 
-# tolerancje: praktyczne "zero" powierzchni / stabilność
 _EPS_AREA = 1e-6  # m^2
 
 
-# -------------------------------
-# Walidacja/naprawa geometrii
-# -------------------------------
 
 def _valid_geom(g: shp.base.BaseGeometry) -> shp.base.BaseGeometry:
-    """Naprawia geometrię (make_valid w Shapely 2, wstecznie buffer(0))."""
     if g is None or g.is_empty:
         return g
     try:
@@ -65,17 +56,9 @@ def _valid_geom(g: shp.base.BaseGeometry) -> shp.base.BaseGeometry:
             return g
 
 
-# -------------------------------
-# Budowa PSLG dla Triangle
-# -------------------------------
 
 def _ring_indices(coords, vertices, idx_map) -> List[int]:
-    """
-    Zwraca indeksy węzłów dla ringu, dodając punkty do globalnej listy vertices
-    (z deduplikacją). Pomija ringu < 3 pkt i o znikomej powierzchni.
-    """
     coords = list(coords)
-    # usuń domknięcie
     if len(coords) >= 2 and coords[0] == coords[-1]:
         coords = coords[:-1]
 
@@ -97,7 +80,6 @@ def _ring_indices(coords, vertices, idx_map) -> List[int]:
     if len(base) < 3:
         return []
 
-    # sprawdź sensowną powierzchnię
     try:
         ring = LinearRing([vertices[i] for i in base])
         area = abs(Polygon([vertices[i] for i in base]).area)
@@ -115,7 +97,7 @@ def _ring_indices(coords, vertices, idx_map) -> List[int]:
 
 
 def _poly_to_pslg(poly: Polygon) -> Dict[str, Any]:
-    """Konwersja Polygon (+holes) -> PSLG: vertices, segments, holes."""
+    """Konwersja Polygon -> PSLG: vertices, segments, holes."""
     if poly.is_empty or abs(poly.area) < _EPS_AREA:
         return {"vertices": np.zeros((0, 2)), "segments": np.zeros((0, 2), dtype=int), "holes": []}
 
@@ -163,7 +145,7 @@ def _poly_to_pslg(poly: Polygon) -> Dict[str, Any]:
 
 
 def _triangulate_single_polygon(poly: Polygon, max_area: float) -> Dict[str, Any]:
-    """Triangulacja pojedynczego Polygonu z limitem powierzchni."""
+    """Triangulacja pojedynczego Polygonu """
     pslg = _poly_to_pslg(poly)
     V = pslg["vertices"]
     S = pslg["segments"]
@@ -193,7 +175,6 @@ def _triangulate_single_polygon(poly: Polygon, max_area: float) -> Dict[str, Any
 
 
 def _triangulate_geom(geom: shp.base.BaseGeometry, max_area: float) -> Dict[str, Any]:
-    """Triangulacja Polygon/MultiPolygon, sklejanie wyników z offsetem."""
     g = _valid_geom(geom)
     if g is None or g.is_empty:
         return {"vertices": np.zeros((0, 2)), "triangles": np.zeros((0, 3), dtype=int)}
@@ -229,9 +210,6 @@ def _triangulate_geom(geom: shp.base.BaseGeometry, max_area: float) -> Dict[str,
     return {"vertices": Vout, "triangles": Tout}
 
 
-# -------------------------------
-# API publiczne
-# -------------------------------
 
 def triangulate_water(water_xy: shp.base.BaseGeometry,
                       route_xy: LineString,
@@ -240,8 +218,6 @@ def triangulate_water(water_xy: shp.base.BaseGeometry,
                       coast_simplify_m: float = 0.0) -> Dict[str, Any]:
     """
     Triangulacja z priorytetem przy trasie i wygaszaniem przy brzegu.
-    - near: gęsto (a1) w pasie B1 wokół trasy (bez erozji, by nic nie „obciąć”).
-    - mid/far: rozrzedzone (a2/a3) na geometrii wody po erozji brzegu i uproszczeniu.
     """
     g_raw = _valid_geom(water_xy)
     if g_raw is None or g_raw.is_empty:

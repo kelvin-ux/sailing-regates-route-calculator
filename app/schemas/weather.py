@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, UUID4
+from pydantic import BaseModel
+from pydantic import UUID4
 from typing import List
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import  field
 from datetime import datetime
-
 
 
 class WeatherPointResponse(BaseModel):

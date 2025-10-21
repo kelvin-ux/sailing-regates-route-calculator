@@ -1,34 +1,38 @@
 from __future__ import annotations
 
 import json
+import numpy as np
 from pathlib import Path
 
-import numpy as np
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import UUID4
 from pyproj import Transformer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from fastapi import APIRouter
+from fastapi import Depends
+from fastapi import Query
+from fastapi import HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi.responses import JSONResponse
+
 from app.core.database import get_db as get_async_session
-from app.schemas.mesh import CreateRouteAndMeshIn, CreateRouteAndMeshOut
 from app.services.db.services import MeshedAreaService
-from app.services.geodata.bathymetry import (
-    WcsRequest,
-    fetch_wcs_geotiff,
-    contours_geojson_from_tif,
-    label_points_along_lines,
-    _bbox_wgs84_from_local_wkt
-)
+from app.schemas.mesh import CreateRouteAndMeshIn
+from app.schemas.mesh import CreateRouteAndMeshOut
 from app.services.mesh.map_data import build_map_geojson
 from app.services.mesh.mesh_builder import create_route_and_mesh
+from app.services.geodata.bathymetry import _bbox_wgs84_from_local_wkt
+from app.services.geodata.bathymetry import label_points_along_lines
+from app.services.geodata.bathymetry import contours_geojson_from_tif
+from app.services.geodata.bathymetry import fetch_wcs_geotiff
+from app.services.geodata.bathymetry import WcsRequest
 
 router = APIRouter()
 
 
 @router.post("/mesh", response_model=CreateRouteAndMeshOut, status_code=201)
 async def create_route_and_mesh_ep(
-        payload: CreateRouteAndMeshIn,
+        payload: CreateRouteAndMeshIn ,
         session: AsyncSession = Depends(get_async_session)
 ):
     """
@@ -82,21 +86,29 @@ async def get_weather_points(
         meshed_area_id: UUID4,
         session: AsyncSession = Depends(get_async_session)
 ):
-    """
-    Zwraca punkty pogodowe jako GeoJSON do wyświetlenia na mapie.
-
-    UWAGA: Ten endpoint pokazuje punkty pogodowe z danymi lub bez.
-    Aby pobrać aktualne dane pogodowe, użyj:
-    POST /api/v1/weather/{meshed_area_id}/fetch-weather
-    """
     svc = MeshedAreaService(session)
     meshed = await svc.get_entity_by_id(meshed_area_id, allow_none=False)
 
-    weather_data = {}
-    if hasattr(meshed, 'weather_data_json') and meshed.weather_data_json:
-        weather_data = json.loads(meshed.weather_data_json)
+    if meshed.weather_points_json:
+        weather_metadata = json.loads(meshed.weather_points_json)
+        points = weather_metadata.get('points', [])
 
-    if not weather_data:
+        features = []
+        for p in points:
+            features.append({
+                "type": "Feature",
+                "properties": {
+                    "index": p['idx'],
+                    "has_data": bool(p.get('route_point_id')),
+                    "route_point_id": p.get('route_point_id'),
+                    "message": "Use POST /api/v1/weather/{mesh_id}/fetch-weather to get weather data."
+                },
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [p.get('lon', p['x']), p.get('lat', p['y'])]
+                }
+            })
+    else:
         nodes = np.array(json.loads(meshed.nodes_json))
         step = max(1, len(nodes) // 30)
         selected_indices = list(range(0, len(nodes), step))[:30]
@@ -121,37 +133,6 @@ async def get_weather_points(
                     "coordinates": [lon, lat]
                 }
             })
-    else:
-        features = []
-        for idx, data in weather_data.items():
-            features.append({
-                "type": "Feature",
-                "properties": {
-                    "index": int(idx),
-                    "has_data": True,
-                    "wind_speed": data.get("wind_speed"),
-                    "wind_direction": data.get("wind_direction"),
-                    "wind_gusts": data.get("wind_gusts"),
-                    "wave_height": data.get("wave_height"),
-                    "wave_direction": data.get("wave_direction"),
-                    "wave_period": data.get("wave_period"),
-                    "wind_wave_height": data.get("wind_wave_height"),
-                    "swell_wave_height": data.get("swell_wave_height"),
-                    "current_velocity": data.get("current_velocity"),
-                    "current_direction": data.get("current_direction"),
-                    "temperature": data.get("temperature"),
-                    "humidity": data.get("humidity"),
-                    "pressure": data.get("pressure"),
-                    "timestamp": data.get("timestamp")
-                },
-                "geometry": {
-                    "type": "Point",
-                    "coordinates": [
-                        data["coords"]["lon"] if "coords" in data else 0,
-                        data["coords"]["lat"] if "coords" in data else 0
-                    ]
-                }
-            })
 
     return {
         "type": "FeatureCollection",
@@ -174,7 +155,7 @@ async def get_contours(
         levels: str = Query("1,2,3,5,10,20,50"),
         session: AsyncSession = Depends(get_async_session)
 ):
-    """Zwraca izobaty (linie głębokości) dla obszaru mesh."""
+    """Zwraca izobaty dla obszaru."""
     svc = MeshedAreaService(session)
     m = await svc.get_entity_by_id(meshed_area_id, allow_none=False)
 
@@ -199,13 +180,7 @@ async def get_contours(
 @router.get("/{meshed_area_id}/view", response_class=HTMLResponse)
 async def view_mesh(meshed_area_id: UUID4):
     """
-    Interactive map viewer for mesh with weather data.
-
-    Shows:
-    - Navigation mesh
-    - Route and control points
-    - Weather points (if data fetched)
-    - Bathymetry contours
+        Map view
     """
     html = f"""
 <!DOCTYPE html>

@@ -116,12 +116,14 @@ class BaseService(Generic[C]):
 
     async def create_entity(self, model_data: T, load_relations: list[str] = None, **kwargs) -> C:
         """Create entity if it does not exist."""
-        if await self.get_entity_by_field(load_relations=load_relations, **kwargs):
-            raise HTTPException(status_code=409, detail=f"{self.model.__name__} already exists")
-        new_entity = self.model(**model_data.model_dump(exclude_unset=True))
+        if kwargs:
+            existing = await self.get_entity_by_field(load_relations=load_relations, **kwargs)
+            if existing:
+                raise HTTPException(status_code=409, detail=f"{self.model.__name__} already exists")
+
+        new_entity = self.model(**model_data.model_dump())
         self.session.add(new_entity)
         await self.safe_commit()
-        await self.session.refresh(new_entity)
 
         if load_relations:
             query = select(self.model)

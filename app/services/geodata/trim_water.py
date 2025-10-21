@@ -9,7 +9,7 @@ from .osm_land import ensure_land_polygons, land_in_bbox
 
 def water_polygon_in_corridor(corridor_xy: Polygon, local_crs: CRS, data_dir: Path) -> Polygon:
     """
-    Wylicza poligon akwenu = (korytarz) minus (ląd). Zwraca w *lokalnym CRS* (metry).
+    Wylicza poligon akwenu = korytarz - ląd.
     """
 
     gpkg = ensure_land_polygons(data_dir / "geodata")

@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.models.models import (
-    Base, Yacht, Route, RoutePoint, WeatherVector, WeatherForecast,
+    Base, Yacht, Route, RoutePoint, WeatherForecast,
     ControlPoint, Obstacle, RouteSegments, YachtType, ObstacleType, 
     ControlPointType, route_obstacles_association
 )
@@ -220,11 +220,6 @@ class TestRoutePoint(DatabaseTest):
             description="Test Route"
         )
 
-    def create_weather_vector_instance(self) -> WeatherVector:
-        return WeatherVector(
-            dir=270.0,  # West wind
-            speed=15.5  # 15.5 knots
-        )
 
     def create_route_point_instance(self, route_id, weather_vector_id) -> RoutePoint:
         return RoutePoint(
@@ -298,12 +293,6 @@ class TestWeatherForecast(DatabaseTest):
             user_id=uuid4(),
             yacht_id=yacht_id,
             description="Test Route"
-        )
-
-    def create_weather_vector_instance(self) -> WeatherVector:
-        return WeatherVector(
-            dir=270.0,
-            speed=15.5
         )
 
     def create_route_point_instance(self, route_id, weather_vector_id) -> RoutePoint:
@@ -424,12 +413,6 @@ class TestRouteSegments(DatabaseTest):
             user_id=uuid4(),
             yacht_id=yacht_id,
             description="Test Route"
-        )
-
-    def create_weather_vector_instance(self) -> WeatherVector:
-        return WeatherVector(
-            dir=270.0,
-            speed=15.5
         )
 
     def create_route_point_instance(self, route_id, weather_vector_id, seq_idx=1) -> RoutePoint:
@@ -565,44 +548,6 @@ def sample_route(db_session, sample_yacht):
     return route
 
 
-def test_complex_route_with_fixtures(db_session, sample_yacht, sample_route):
-    """Test creating a complex route with multiple components using fixtures"""
-
-    weather_vector = WeatherVector(dir=270.0, speed=15.5)
-    db_session.add(weather_vector)
-    db_session.commit()
-
-    point1 = RoutePoint(
-        route_id=sample_route.id,
-        seq_idx=1,
-        x=18.6466,
-        y=54.3520,
-        weather_vector_id=weather_vector.id
-    )
-    point2 = RoutePoint(
-        route_id=sample_route.id,
-        seq_idx=2,
-        x=18.6566,
-        y=54.3620,
-        weather_vector_id=weather_vector.id
-    )
-    db_session.add_all([point1, point2])
-    db_session.commit()
-
-    segment = RouteSegments(
-        route_id=sample_route.id,
-        from_point=point1.id,
-        to_point=point2.id,
-        segment_order=1,
-        sail_type="genoa"
-    )
-    db_session.add(segment)
-    db_session.commit()
-
-    route_db = db_session.query(Route).filter_by(id=sample_route.id).first()
-    assert len(route_db.route_points) == 2
-    assert len(route_db.route_segments) == 1
-    assert route_db.yacht.name == "Test Yacht"
 
 
 if __name__ == '__main__':

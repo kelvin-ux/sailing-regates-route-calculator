@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import time
-from typing import List, Dict, Optional, Tuple
-from datetime import datetime, timedelta
 import aiohttp
-from collections import deque
 import redis.asyncio as redis
-import json
+from datetime import datetime
+from typing import List
+from typing import Dict
+from typing import Optional
+from typing import Tuple
 
 from app.schemas.weather import MarineWeatherRequest
 from app.services.weather.WeatherCache import WeatherCache

@@ -66,6 +66,10 @@ class ControlPointType(enum.StrEnum):
     GATE = "gate"
     NATURAL = "natural"
 
+class RoutePointType(enum.StrEnum):
+    NAVIGATION = "navigation"
+    WEATHER = "weather"
+    CONTROL = "control"
 
 
 route_obstacles_association = Table(
@@ -115,16 +119,6 @@ class Obstacle(Base):
         back_populates="obstacles"
     )
 
-class WeatherVector(Base):
-    __tablename__ = "weather_vector"
-
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), default=uuid4, primary_key=True)
-    dir: Mapped[float] = mapped_column(Float, nullable=False, comment="Direction in degrees")
-    speed: Mapped[float] = mapped_column(Float, nullable=False, comment="Speed in knots/m/s")
-
-    
-    route_points: Mapped[List["RoutePoint"]] = relationship("RoutePoint", back_populates="weather_vector")
-
 class Route(Base):
     __tablename__ = "route"
 
@@ -147,22 +141,24 @@ class Route(Base):
         secondary=route_obstacles_association, 
         back_populates="routes"
     )
+    meshed_areas: Mapped[List["MeshedArea"]] = relationship("MeshedArea", back_populates="route")
 
 class RoutePoint(Base):
     __tablename__ = "route_point"
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), default=uuid4, primary_key=True)
     route_id: Mapped[UUID] = mapped_column(ForeignKey("route.id"), nullable=False)
+    meshed_area_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("meshed_area.id"), nullable=True)
+    point_type: Mapped[RoutePointType] = mapped_column(Enum(RoutePointType), nullable=False, default=RoutePointType.NAVIGATION)
     seq_idx: Mapped[int] = mapped_column(Integer, nullable=False, comment="Sequence index in route")
     x: Mapped[float] = mapped_column(Float, nullable=False, comment="Longitude")
     y: Mapped[float] = mapped_column(Float, nullable=False, comment="Latitude")
     timestamp: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     heuristic_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="A* heuristic score")
-    weather_vector_id: Mapped[UUID] = mapped_column(ForeignKey("weather_vector.id"), nullable=False)
 
     
     route: Mapped["Route"] = relationship("Route", back_populates="route_points")
-    weather_vector: Mapped["WeatherVector"] = relationship("WeatherVector", back_populates="route_points")
+    meshed_area: Mapped[Optional["MeshedArea"]] = relationship("MeshedArea", back_populates="route_points")
     weather_forecasts: Mapped[List["WeatherForecast"]] = relationship("WeatherForecast", back_populates="route_point")
     segments_from: Mapped[List["RouteSegments"]] = relationship(
         "RouteSegments", 
@@ -175,22 +171,42 @@ class RoutePoint(Base):
         back_populates="to_point_rel"
     )
 
+
 class WeatherForecast(Base):
     __tablename__ = "weather_forecast"
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), default=uuid4, primary_key=True)
     route_point_id: Mapped[UUID] = mapped_column(ForeignKey("route_point.id"), nullable=False)
-    forecast_timestamp: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    fetched_timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    temperature: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Temperature in Celsius")
-    wind_speed: Mapped[float] = mapped_column(Float, nullable=False, comment="Wind speed in knots")
-    wind_direction: Mapped[float] = mapped_column(Float, nullable=False, comment="Wind direction in degrees")
-    humidity: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Humidity percentage")
-    desc: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, comment="Weather description")
-    weather_vector_id: Mapped[UUID] = mapped_column(ForeignKey("weather_vector.id"), nullable=False)
+    forecast_timestamp: Mapped[datetime] = mapped_column(DateTime, nullable=False, comment="When this forecast is for")
+    fetched_timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
+                                                        comment="When data was fetched")
 
-    
+    temperature: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Temperature in Celsius")
+    humidity: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Humidity percentage")
+    pressure: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Pressure in hPa")
+
+    wind_speed: Mapped[float] = mapped_column(Float, nullable=False, comment="Wind speed in m/s")
+    wind_direction: Mapped[float] = mapped_column(Float, nullable=False, comment="Wind direction in degrees")
+    wind_gusts: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Wind gusts in m/s")
+
+    wave_height: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Wave height in meters")
+    wave_direction: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Wave direction in degrees")
+    wave_period: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Wave period in seconds")
+    wind_wave_height: Mapped[Optional[float]] = mapped_column(Float, nullable=True,
+                                                              comment="Wind wave height in meters")
+    swell_wave_height: Mapped[Optional[float]] = mapped_column(Float, nullable=True,
+                                                               comment="Swell wave height in meters")
+
+    current_velocity: Mapped[Optional[float]] = mapped_column(Float, nullable=True,
+                                                              comment="Ocean current velocity in m/s")
+    current_direction: Mapped[Optional[float]] = mapped_column(Float, nullable=True,
+                                                               comment="Ocean current direction in degrees")
+
+    source: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, comment="Data source (e.g., open-meteo)")
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, comment="Whether this is default/fallback data")
+
     route_point: Mapped["RoutePoint"] = relationship("RoutePoint", back_populates="weather_forecasts")
+
 
 class ControlPoint(Base):
     __tablename__ = "control_point"
@@ -239,11 +255,6 @@ class RouteSegments(Base):
         back_populates="segments_to"
     )
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Text
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-from uuid import uuid4, UUID
-from datetime import datetime
 
 class MeshedArea(Base):
     __tablename__ = "meshed_area"
@@ -258,7 +269,7 @@ class MeshedArea(Base):
     water_wkt: Mapped[str] = mapped_column(Text, nullable=False)
     route_wkt: Mapped[str] = mapped_column(Text, nullable=False)
 
-    weather_data_json: Mapped[str] = mapped_column(
+    weather_points_json: Mapped[str] = mapped_column(
         Text,
         nullable=True,
         comment="JSON with weather data for mesh points"
@@ -266,12 +277,15 @@ class MeshedArea(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
-    route: Mapped["Route"] = relationship("Route", backref="meshed_areas")
+    route: Mapped["Route"] = relationship("Route", back_populates="meshed_areas")
+    route_points: Mapped[List["RoutePoint"]] = relationship("RoutePoint", back_populates="meshed_area")
 
 
 Index('idx_route_yacht_id', Route.yacht_id)
 Index('idx_route_point_route_id', RoutePoint.route_id)
 Index('idx_route_point_seq_idx', RoutePoint.seq_idx)
+Index('idx_route_point_type', RoutePoint.point_type)
+Index('idx_route_point_meshed_area', RoutePoint.meshed_area_id)
 Index('idx_weather_forecast_route_point_id', WeatherForecast.route_point_id)
 Index('idx_weather_forecast_timestamp', WeatherForecast.forecast_timestamp)
 Index('idx_route_segments_route_id', RouteSegments.route_id)

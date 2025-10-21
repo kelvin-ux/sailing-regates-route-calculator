@@ -1,15 +1,3 @@
-## TODO - under development
-- fix vector alrd exists
-- improve meshing near obsticles
-- try to reduce number of navigation points to improve performance
-- improve placing weather points
-- fix database integrations 
-- fix map visualisation endpoint
-- improve map trimming 
-- clean up repo 
-- create unit and integrations tests for meshing stage 
-- connect navi points with batometry map 
-
 # Sailing Route Optimizer
 
 This project provides an intelligent sailing route planning system for both competitive sailors and recreational boaters. It calculates optimal routes by considering weather conditions, marine obstacles, and vessel characteristics.

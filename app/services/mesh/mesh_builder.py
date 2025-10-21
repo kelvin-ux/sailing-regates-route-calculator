@@ -1,34 +1,43 @@
 from __future__ import annotations
 
-from pathlib import Path
-import json
-from typing import Tuple
-from dataclasses import dataclass
-from typing import Optional, List, Dict, Any
-
-from shapely.geometry import Point
-from sklearn.cluster import KMeans
-from scipy.spatial import KDTree
 import numpy as np
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Tuple
+from typing import Optional
+from typing import List
+from typing import Dict
+from typing import Any
+
 from sqlalchemy.ext.asyncio import AsyncSession
-from shapely.geometry import LineString
 from pyproj import CRS
 
-from app.schemas.mesh import CreateRouteAndMeshIn
-from app.schemas.db_create import (
-    RouteCreate, WeatherVectorCreate, RoutePointCreate, MeshedAreaCreate
-)
-from app.services.db.services import (
-    RouteService, RoutePointService, WeatherVectorService, MeshedAreaService
-)
-from app.services.geodata.corridor import _utm_crs_for, _to_proj
-from app.services.geodata.trim_water import water_polygon_in_corridor
-from app.services.meshing.triangle_mesher import MeshZones, triangulate_water
-from app.services.routing.qucik_path import safe_polyline
+from shapely.geometry import Point
+from shapely.geometry import LineString
+from sklearn.cluster import KMeans
+from scipy.spatial import KDTree
 
-from app.services.geodata.bathymetry import (
-    WcsRequest,fetch_wcs_geotiff,shallow_mask_from_tif, _bbox_wgs84_from_local_wkt
-)
+from app.schemas.mesh import CreateRouteAndMeshIn
+from app.schemas.db_create import RouteCreate
+from app.schemas.db_create import RoutePointCreate
+from app.schemas.db_create import MeshedAreaCreate
+
+from app.models.models import RoutePointType
+
+from app.services.db.services import MeshedAreaService
+from app.services.db.services import RoutePointService
+from app.services.db.services import RouteService
+from app.services.geodata.corridor import _to_proj
+from app.services.geodata.corridor import _utm_crs_for
+from app.services.geodata.trim_water import water_polygon_in_corridor
+from app.services.meshing.triangle_mesher import triangulate_water
+from app.services.meshing.triangle_mesher import MeshZones
+from app.services.routing.qucik_path import safe_polyline
+from app.services.geodata.bathymetry import WcsRequest
+from app.services.geodata.bathymetry import shallow_mask_from_tif
+from app.services.geodata.bathymetry import _bbox_wgs84_from_local_wkt
+from app.services.geodata.bathymetry import fetch_wcs_geotiff
 
 COAST_CLEAR_M = 500.0
 COAST_SIMPLY = 20.0
@@ -44,9 +53,10 @@ THRESHOLD = DRAFT_M + CLEARANCE_M
 @dataclass
 class WeatherMeshConfig:
     max_points: int = MAX_WEATHER_POINTS
-    grid_spacing_m : float = WEATHER_GRID_M
+    grid_spacing_m: float = WEATHER_GRID_M
     priority_route_points: int = 20
     cluster_method: str = "kmeans"
+
 
 @dataclass
 class DualMeshResult:
@@ -65,13 +75,13 @@ class WeatherPointSelector:
         route_points = self._sample_along_route(route_line, self.config.priority_route_points)
         selected.extend(route_points)
 
-        remainginuses = self.config.max_points - len(route_points)
+        remaining = self.config.max_points - len(route_points)
 
-        if remainginuses > 0:
+        if remaining > 0:
             if self.config.cluster_method == "kmeans":
-                additional = self._select_by_cluster(navigation_vertices, remainginuses, exclude_near=route_points)
+                additional = self._select_by_cluster(navigation_vertices, remaining, exclude_near=route_points)
             else:
-                additional = self._select_by_grid(water_poly, remainginuses, self.config.grid_spacing_m)
+                additional = self._select_by_grid(water_poly, remaining, self.config.grid_spacing_m)
             selected.extend(additional)
 
         return selected[:self.config.max_points]
@@ -91,7 +101,7 @@ class WeatherPointSelector:
         if len(vertices) < n:
             return [(v[0], v[1]) for v in vertices]
 
-        kmeans = KMeans(n_clusters=n, random_state = 42, n_init = 10)
+        kmeans = KMeans(n_clusters=n, random_state=42, n_init=10)
         kmeans.fit(vertices)
 
         centers = kmeans.cluster_centers_
@@ -100,7 +110,7 @@ class WeatherPointSelector:
             exclude_tree = KDTree(exclude_near)
             filtered = []
             for center in centers:
-                dist, _ = exclude_tree.query(center, k = 1)
+                dist, _ = exclude_tree.query(center, k=1)
                 if dist > 1000:
                     filtered.append((center[0], center[1]))
             return filtered
@@ -147,20 +157,15 @@ class WeatherDataInterpolator:
         weather_tree = KDTree(weather_points)
         mapping = {i: [] for i in range(len(weather_points))}
         for nav_idx, nav_vertex in enumerate(nav_vertices):
-            _, weather_idx = weather_tree.query(nav_vertex, k =1)
+            _, weather_idx = weather_tree.query(nav_vertex, k=1)
             mapping[weather_idx].append(nav_idx)
 
         return mapping
 
     @staticmethod
-    def interpolate_weather_data(weather_data: Dict[int, Dict],mapping: Dict[int, List[int]],nav_vertices: np.ndarray) -> np.ndarray:
+    def interpolate_weather_data(weather_data: Dict[int, Dict], mapping: Dict[int, List[int]], nav_vertices: np.ndarray) -> np.ndarray:
         """
         Interpoluje dane pogodowe na wszystkie punkty nawigacyjne
-
-        weather_data: {weather_point_idx: {'wind_speed': ..., 'wind_dir': ...}}
-        mapping: Mapowanie weather->nav points
-        nav_vertices: Wierzchołki nawigacyjne
-
         Zwraca tablice z danymi pogodowymi dla każdego punktu nawigacyjnego
         """
         nav_weather = np.zeros((len(nav_vertices), 2))  # [wind_speed, wind_dir]
@@ -175,9 +180,10 @@ class WeatherDataInterpolator:
 
         return nav_weather
 
-async def create_route_and_mesh(session: AsyncSession,payload: CreateRouteAndMeshIn,weather_config: Optional[WeatherMeshConfig] = None) -> Dict[str, Any]:
+
+async def create_route_and_mesh(session: AsyncSession, payload: CreateRouteAndMeshIn, weather_config: Optional[WeatherMeshConfig] = None) -> Dict[str, Any]:
     """
-        Zwraca dict z route_id, mesh_id, weather_points, navigation_mesh
+    Zwraca dict z route_id, mesh_id, weather_points, navigation_mesh
     """
     if not weather_config:
         weather_config = WeatherMeshConfig()
@@ -187,7 +193,6 @@ async def create_route_and_mesh(session: AsyncSession,payload: CreateRouteAndMes
 
     route_svc = RouteService(session)
     rpoint_svc = RoutePointService(session)
-    wv_svc = WeatherVectorService(session)
     mesh_svc = MeshedAreaService(session)
 
     ctrl_json = json.dumps([[p.lon, p.lat] for p in payload.points])
@@ -196,28 +201,18 @@ async def create_route_and_mesh(session: AsyncSession,payload: CreateRouteAndMes
             user_id=payload.user_id,
             yacht_id=payload.yacht_id,
             control_points=ctrl_json
-        ),
-        user_id=payload.user_id,
-        yacht_id=payload.yacht_id,
-        control_points=ctrl_json
-    )
-
-    wv = await wv_svc.create_entity(
-        model_data=WeatherVectorCreate(dir=0.0, speed=0.0),
-        dir=0.0, speed=0.0
+        )
     )
 
     for i, p in enumerate(payload.points):
         await rpoint_svc.create_entity(
             model_data=RoutePointCreate(
                 route_id=route.id,
+                point_type=RoutePointType.CONTROL,
                 seq_idx=i,
                 x=p.lon,
-                y=p.lat,
-                weather_vector_id=wv.id
-            ),
-            route_id=route.id,
-            seq_idx=i
+                y=p.lat
+            )
         )
 
     line_ll = LineString([(p.lon, p.lat) for p in payload.points])
@@ -259,7 +254,6 @@ async def create_route_and_mesh(session: AsyncSession,payload: CreateRouteAndMes
             route_xy = safe_line
             corridor_xy = route_xy.buffer(buffer_m, cap_style=2, join_style=2)
 
-
     nav_zones = MeshZones(
         radii_m=[payload.ring1_m, payload.ring2_m, payload.ring3_m],
         max_area_m2=[payload.area1, payload.area2, payload.area3],
@@ -289,7 +283,6 @@ async def create_route_and_mesh(session: AsyncSession,payload: CreateRouteAndMes
         nav_vertices
     )
 
-
     mesh_data = {
         "navigation": {
             "vertices": nav_vertices.tolist() if hasattr(nav_vertices, "tolist") else nav_vertices,
@@ -301,6 +294,14 @@ async def create_route_and_mesh(session: AsyncSession,payload: CreateRouteAndMes
         }
     }
 
+    weather_points_metadata = {
+        "points": [
+            {"idx": idx, "x": p[0], "y": p[1]}
+            for idx, p in enumerate(weather_points)
+        ],
+        "mapping": mesh_data["weather"]["mapping"]
+    }
+
     meshed = await mesh_svc.create_entity(
         model_data=MeshedAreaCreate(
             route_id=route.id,
@@ -309,12 +310,9 @@ async def create_route_and_mesh(session: AsyncSession,payload: CreateRouteAndMes
             triangles_json=json.dumps(mesh_data["navigation"]["triangles"]),
             water_wkt=water_xy.wkt,
             route_wkt=route_xy.wkt,
-        ),
-        route_id=route.id,
-        route_wkt=route_xy.wkt
+            weather_points_json=json.dumps(weather_points_metadata)
+        )
     )
-
-    # TODO: Add weather_points_json do modelu MeshedArea
 
     return {
         "route_id": route.id,
