@@ -70,6 +70,8 @@ class RoutePointType(enum.StrEnum):
     NAVIGATION = "navigation"
     WEATHER = "weather"
     CONTROL = "control"
+    START = "start"
+    STOP = "stop"
 
 
 route_obstacles_association = Table(
@@ -149,7 +151,7 @@ class RoutePoint(Base):
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), default=uuid4, primary_key=True)
     route_id: Mapped[UUID] = mapped_column(ForeignKey("route.id"), nullable=False)
     meshed_area_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("meshed_area.id"), nullable=True)
-    point_type: Mapped[RoutePointType] = mapped_column(Enum(RoutePointType), nullable=False, default=RoutePointType.NAVIGATION)
+    point_type: Mapped[RoutePointType] = mapped_column(Enum(RoutePointType, name="route_point_type", native_enum = True, create_type = False, validate_string = True), nullable=False, default=RoutePointType.NAVIGATION)
     seq_idx: Mapped[int] = mapped_column(Integer, nullable=False, comment="Sequence index in route")
     x: Mapped[float] = mapped_column(Float, nullable=False, comment="Longitude")
     y: Mapped[float] = mapped_column(Float, nullable=False, comment="Latitude")

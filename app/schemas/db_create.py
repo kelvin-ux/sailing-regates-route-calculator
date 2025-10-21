@@ -9,6 +9,8 @@ class RoutePointType(str, Enum):
     NAVIGATION = "navigation"
     WEATHER = "weather"
     CONTROL = "control"
+    START = "start"
+    STOP = "stop"
 
 
 class RouteCreate(BaseModel):
@@ -21,7 +23,7 @@ class RouteCreate(BaseModel):
 class RoutePointCreate(BaseModel):
     route_id: UUID4
     meshed_area_id: Optional[UUID4] = None
-    point_type: RoutePointType = RoutePointType.NAVIGATION
+    point_type: RoutePointType
     seq_idx: int
     x: float  # lon
     y: float  # lat
