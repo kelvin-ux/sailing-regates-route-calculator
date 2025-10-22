@@ -13,6 +13,7 @@ from shapely import wkt
 from shapely.ops import transform as shp_transform
 from pyproj import Transformer
 
+from app.schemas.db_create import RoutePointType
 from app.services.db.services import MeshedAreaService
 from app.services.db.services import RoutePointService
 from app.services.db.services import RouteService
@@ -83,18 +84,27 @@ async def build_map_geojson(session: AsyncSession, meshed_area_id: str) -> Dict[
         except Exception:
             pass
 
-    control_points: List[Tuple[int, float, float]] = []
+    control_points: List[Tuple[int, float, float, str]] = []
     pts_raw = await rpoint_svc.get_all_entities(filters={"route_id": meshed.route_id}, page=1, limit=10000)
     if isinstance(pts_raw, dict) and "results" in pts_raw:
         pts_raw = pts_raw["results"]
 
     for p in (pts_raw or []):
+        point_type = getattr(p, "point_type", None) if not isinstance(p, dict) else p.get("point_type")
+
+        if point_type not in [RoutePointType.START, RoutePointType.STOP, RoutePointType.CONTROL]:
+            continue
+
         x = getattr(p, "x", None) if not isinstance(p, dict) else p.get("x")
         y = getattr(p, "y", None) if not isinstance(p, dict) else p.get("y")
         idx = getattr(p, "seq_idx", None) if not isinstance(p, dict) else p.get("seq_idx")
         if x is not None and y is not None:
-            control_points.append((int(idx or len(control_points)), float(x), float(y)))
-
+            control_points.append((
+                int(idx or len(control_points)),
+                float(x),
+                float(y),
+                str(point_type)
+            ))
     if not control_points:
         route_obj = await route_svc.get_entity_by_id(meshed.route_id, allow_none=True)
         ctrl_json = None
@@ -104,14 +114,31 @@ async def build_map_geojson(session: AsyncSession, meshed_area_id: str) -> Dict[
             try:
                 coords = json.loads(ctrl_json)
                 for i, (lon, lat) in enumerate(coords):
-                    control_points.append((i, float(lon), float(lat)))
+                    if i == 0:
+                        ptype = "start"
+                    elif i == len(coords) - 1:
+                        ptype = "stop"
+                    else:
+                        ptype = "control"
+                    control_points.append((i, float(lon), float(lat), ptype))
             except Exception:
                 pass
 
-    for idx, lon, lat in sorted(control_points, key=lambda r: r[0]):
+    for idx, lon, lat, point_type in sorted(control_points, key=lambda r: r[0]):
+        marker_class = "control-point"
+        if point_type == RoutePointType.START or point_type == "start":
+            marker_class = "control-point-start"
+        elif point_type == RoutePointType.STOP or point_type == "stop":
+            marker_class = "control-point-stop"
+
         features.append({
             "type": "Feature",
-            "properties": {"type": "control_point", "seq_idx": idx},
+            "properties": {
+                "type": "control_point",
+                "seq_idx": idx,
+                "point_type": point_type,
+                "marker_class": marker_class
+            },
             "geometry": {"type": "Point", "coordinates": [lon, lat]},
         })
 

@@ -5,6 +5,7 @@ import numpy as np
 from typing import Optional
 from typing import List
 from datetime import datetime
+from datetime import timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from pyproj import Transformer
@@ -14,9 +15,13 @@ from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Query
 from pydantic import UUID4
+from sqlalchemy import select
+from sqlalchemy import and_
 
 from app.core.database import get_db as get_async_session
 from app.models.models import RoutePointType
+from app.models.models import RoutePoint
+from app.models.models import WeatherForecast
 from app.services.db.services import MeshedAreaService
 from app.services.db.services import RoutePointService
 from app.services.db.services import WeatherForecastService
@@ -228,10 +233,6 @@ async def get_weather_history(
     Get historical weather data from WeatherForecast.
     """
     try:
-        from datetime import timedelta
-        from sqlalchemy import select, and_
-        from app.models.models import RoutePoint, WeatherForecast
-
         mesh_svc = MeshedAreaService(session)
         meshed = await mesh_svc.get_entity_by_id(meshed_area_id, allow_none=False)
 

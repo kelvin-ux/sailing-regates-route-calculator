@@ -32,7 +32,7 @@ router = APIRouter()
 
 @router.post("/mesh", response_model=CreateRouteAndMeshOut, status_code=201)
 async def create_route_and_mesh_ep(
-        payload: CreateRouteAndMeshIn ,
+        payload: CreateRouteAndMeshIn,
         session: AsyncSession = Depends(get_async_session)
 ):
     """
@@ -86,8 +86,23 @@ async def get_weather_points(
         meshed_area_id: UUID4,
         session: AsyncSession = Depends(get_async_session)
 ):
+    from sqlalchemy import select
+    from app.models.models import RoutePoint, WeatherForecast, RoutePointType
+    from uuid import UUID
+    from shapely import wkt
+    from shapely.geometry import Point, LineString
+
     svc = MeshedAreaService(session)
     meshed = await svc.get_entity_by_id(meshed_area_id, allow_none=False)
+
+    # Załaduj trasę dla określenia stref
+    route_wkt_str = getattr(meshed, "route_wkt", None)
+    route_geom = None
+    if route_wkt_str:
+        try:
+            route_geom = wkt.loads(route_wkt_str)
+        except Exception:
+            pass
 
     if meshed.weather_points_json:
         weather_metadata = json.loads(meshed.weather_points_json)
@@ -95,14 +110,77 @@ async def get_weather_points(
 
         features = []
         for p in points:
+            props = {
+                "index": p['idx'],
+                "has_data": False,
+                "route_point_id": p.get('route_point_id'),
+            }
+
+            # Określ strefę punktu
+            point_geom = Point(p['x'], p['y'])
+            zone = 'unknown'
+            if route_geom and isinstance(route_geom, LineString):
+                distance = route_geom.distance(point_geom)
+                if distance <= 100:  # Na trasie lub bardzo blisko
+                    zone = 'route'
+                elif distance <= 500:
+                    zone = 'near'
+                elif distance <= 1500:
+                    zone = 'mid'
+                else:
+                    zone = 'far'
+
+            props['zone'] = zone
+
+            # Pobierz najnowsze dane pogodowe dla tego punktu
+            route_point_id_str = p.get('route_point_id')
+            if route_point_id_str:
+                try:
+                    # Konwertuj string UUID na UUID
+                    route_point_uuid = UUID(route_point_id_str) if isinstance(route_point_id_str,
+                                                                              str) else route_point_id_str
+
+                    query = (
+                        select(WeatherForecast)
+                        .where(WeatherForecast.route_point_id == route_point_uuid)
+                        .order_by(WeatherForecast.forecast_timestamp.desc())
+                        .limit(1)
+                    )
+                    result = await session.execute(query)
+                    weather = result.scalar_one_or_none()
+
+                    if weather:
+                        props.update({
+                            "has_data": True,
+                            "wind_speed": float(weather.wind_speed) if weather.wind_speed is not None else 0.0,
+                            "wind_direction": float(
+                                weather.wind_direction) if weather.wind_direction is not None else 0.0,
+                            "wind_gusts": float(weather.wind_gusts) if weather.wind_gusts is not None else 0.0,
+                            "wave_height": float(weather.wave_height) if weather.wave_height is not None else 0.0,
+                            "wave_direction": float(
+                                weather.wave_direction) if weather.wave_direction is not None else 0.0,
+                            "wave_period": float(weather.wave_period) if weather.wave_period is not None else 0.0,
+                            "wind_wave_height": float(
+                                weather.wind_wave_height) if weather.wind_wave_height is not None else 0.0,
+                            "swell_wave_height": float(
+                                weather.swell_wave_height) if weather.swell_wave_height is not None else 0.0,
+                            "current_velocity": float(
+                                weather.current_velocity) if weather.current_velocity is not None else 0.0,
+                            "current_direction": float(
+                                weather.current_direction) if weather.current_direction is not None else 0.0,
+                            "temperature": float(weather.temperature) if weather.temperature is not None else 0.0,
+                            "humidity": float(weather.humidity) if weather.humidity is not None else 0.0,
+                            "pressure": float(weather.pressure) if weather.pressure is not None else 0.0,
+                            "timestamp": weather.forecast_timestamp.isoformat() if weather.forecast_timestamp else None,
+                        })
+                except Exception as e:
+                    print(f"Error fetching weather for point {p['idx']}: {e}")
+                    import traceback
+                    traceback.print_exc()
+
             features.append({
                 "type": "Feature",
-                "properties": {
-                    "index": p['idx'],
-                    "has_data": bool(p.get('route_point_id')),
-                    "route_point_id": p.get('route_point_id'),
-                    "message": "Use POST /api/v1/weather/{mesh_id}/fetch-weather to get weather data."
-                },
+                "properties": props,
                 "geometry": {
                     "type": "Point",
                     "coordinates": [p.get('lon', p['x']), p.get('lat', p['y'])]
@@ -126,6 +204,7 @@ async def get_weather_points(
                 "properties": {
                     "index": i,
                     "has_data": False,
+                    "zone": "unknown",
                     "message": "No weather data. Use POST /api/v1/weather/{mesh_id}/fetch-weather to get data."
                 },
                 "geometry": {
@@ -207,23 +286,86 @@ async def view_mesh(meshed_area_id: UUID4):
 
     .weather-point {{
       background: radial-gradient(circle, #ff6b6b, #ff3333);
-      border: 2px solid white;
+      border: 3px solid white;
       border-radius: 50%;
-      width: 12px !important;
-      height: 12px !important;
+      width: 16px !important;
+      height: 16px !important;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-shadow: 0 0 8px rgba(255, 51, 51, 0.4);
+    }}
+
+    .weather-point-route {{
+      width: 14px !important;
+      height: 14px !important;
+      background: radial-gradient(circle, #ff8888, #ff4444);
+    }}
+
+    .weather-point-near {{
+      width: 16px !important;
+      height: 16px !important;
+      background: radial-gradient(circle, #ff6b6b, #ff3333);
+    }}
+
+    .weather-point-mid {{
+      width: 13px !important;
+      height: 13px !important;
+      background: radial-gradient(circle, #ff9999, #ff5555);
+      opacity: 0.9;
+    }}
+
+    .weather-point-far {{
+      width: 10px !important;
+      height: 10px !important;
+      background: radial-gradient(circle, #ffaaaa, #ff6666);
+      opacity: 0.8;
+    }}
+
+    .weather-point:hover {{
+      width: 20px !important;
+      height: 20px !important;
+      border: 4px solid white;
+      box-shadow: 0 0 15px rgba(255, 51, 51, 0.8);
+      transform: scale(1.1);
     }}
 
     .weather-point-nodata {{
       background: #999;
-      opacity: 0.5;
+      opacity: 0.6;
+      box-shadow: none;
+    }}
+
+    .weather-point-nodata:hover {{
+      opacity: 0.9;
     }}
 
     .control-point {{
       background: #ffd700;
       border: 2px solid #000;
       border-radius: 50%;
-      width: 10px !important;
-      height: 10px !important;
+      width: 14px !important;
+      height: 14px !important;
+      z-index: 900;
+    }}
+
+    .control-point-start {{
+      background: #00ff00;
+      border: 3px solid #006600;
+      border-radius: 50%;
+      width: 16px !important;
+      height: 16px !important;
+      z-index: 900;
+      box-shadow: 0 0 10px rgba(0, 255, 0, 0.6);
+    }}
+
+    .control-point-stop {{
+      background: #ff0000;
+      border: 3px solid #660000;
+      border-radius: 50%;
+      width: 16px !important;
+      height: 16px !important;
+      z-index: 900;
+      box-shadow: 0 0 10px rgba(255, 0, 0, 0.6);
     }}
 
     .fetch-weather-btn {{
@@ -247,8 +389,9 @@ async def view_mesh(meshed_area_id: UUID4):
     }}
 
     .leaflet-popup-content {{
-      min-width: 220px;
+      min-width: 250px;
       font-size: 13px;
+      line-height: 1.5;
     }}
 
     .leaflet-popup-content strong {{
@@ -256,6 +399,17 @@ async def view_mesh(meshed_area_id: UUID4):
       display: block;
       margin-top: 8px;
       margin-bottom: 2px;
+      font-size: 14px;
+      border-bottom: 1px solid #eee;
+      padding-bottom: 2px;
+    }}
+
+    .leaflet-popup-content strong:first-child {{
+      margin-top: 4px;
+    }}
+
+    .weather-popup .leaflet-popup-content-wrapper {{
+      border-radius: 8px;
     }}
   </style>
 </head>
@@ -309,12 +463,30 @@ fetch(`/api/v1/routes_mesh/${{MESH_ID}}/map`)
     // Punkty kontrolne
     L.geoJSON(data, {{
       filter: f => f.properties?.type === 'control_point',
-      pointToLayer: (f, ll) => L.marker(ll, {{
-        icon: L.divIcon({{
-          className: 'control-point',
-          iconSize: [10, 10]
-        }})
-      }})
+      pointToLayer: (f, ll) => {{
+        const markerClass = f.properties?.marker_class || 'control-point';
+        const pointType = f.properties?.point_type || 'control';
+
+        let label = '';
+        if (pointType === 'start' || pointType === 'START') {{
+          label = 'START';
+        }} else if (pointType === 'stop' || pointType === 'STOP') {{
+          label = 'FINISH';
+        }} else {{
+          label = `CP ${{f.properties?.seq_idx || ''}}`;
+        }}
+
+        const marker = L.marker(ll, {{
+          icon: L.divIcon({{
+            className: markerClass,
+            iconSize: markerClass.includes('start') || markerClass.includes('stop') ? [16, 16] : [14, 14],
+            iconAnchor: markerClass.includes('start') || markerClass.includes('stop') ? [8, 8] : [7, 7]
+          }})
+        }});
+
+        marker.bindPopup(`<b>${{label}}</b><br>Type: ${{pointType}}`);
+        return marker;
+      }}
     }}).addTo(map);
 
     // Dopasuj widok
@@ -327,9 +499,13 @@ fetch(`/api/v1/routes_mesh/${{MESH_ID}}/map`)
 
 // Funkcja do załadowania punktów pogodowych
 function loadWeatherPoints() {{
+  console.log('Loading weather points for mesh:', MESH_ID);
+
   fetch(`/api/v1/routes_mesh/${{MESH_ID}}/weather-points`)
     .then(r => r.json())
     .then(data => {{
+      console.log('Weather points data received:', data);
+
       if (weatherLayer) {{
         map.removeLayer(weatherLayer);
       }}
@@ -338,43 +514,93 @@ function loadWeatherPoints() {{
         pointToLayer: (f, ll) => {{
           const p = f.properties;
           const hasData = p.has_data;
+          const zone = p.zone || 'unknown';
+
+          console.log(`Point #${{p.index}}: has_data=${{hasData}}, zone=${{zone}}`, p);
 
           let popup = `<b>Weather Point #${{p.index}}</b><br>`;
+          popup += `<small style="color: #666;">Zone: ${{zone}}</small><br>`;
+          popup += `<div style="max-height: 300px; overflow-y: auto;">`;
+
           if (hasData) {{
-            popup += ` <strong>Wind</strong><br>`;
-            popup += `  -Speed: ${{p.wind_speed?.toFixed(1)}} m/s<br>`;
-            popup += `  -Direction: ${{p.wind_direction?.toFixed(0)}}°<br>`;
-            popup += `  -Gusts: ${{p.wind_gusts?.toFixed(1)}} m/s<br>`;
-            popup += ` <strong>Waves</strong><br>`;
-            popup += `  -Height: ${{p.wave_height?.toFixed(2)}} m<br>`;
-            popup += `  -Direction: ${{p.wave_direction?.toFixed(0)}}°<br>`;
-            popup += `  -Period: ${{p.wave_period?.toFixed(1)}} s<br>`;
-            popup += `  -Wind waves: ${{p.wind_wave_height?.toFixed(2)}} m<br>`;
-            popup += `  -Swell: ${{p.swell_wave_height?.toFixed(2)}} m<br>`;
-            popup += ` <strong>Current</strong><br>`;
-            popup += `  -Velocity: ${{p.current_velocity?.toFixed(2)}} m/s<br>`;
-            popup += `  -Direction: ${{p.current_direction?.toFixed(0)}}°<br>`;
-            popup += ` <strong>Atmosphere</strong><br>`;
-            popup += `  -Temp: ${{p.temperature?.toFixed(1)}}°C<br>`;
-            popup += `  -Humidity: ${{p.humidity?.toFixed(0)}}%<br>`;
-            popup += `  -Pressure: ${{p.pressure?.toFixed(1)}} hPa<br>`;
-            popup += `<br><small>${{p.timestamp || 'N/A'}}</small>`;
+            popup += `<strong>Wind</strong><br>`;
+            popup += `&nbsp;&nbsp;Speed: ${{p.wind_speed?.toFixed(1) || 'N/A'}} m/s<br>`;
+            popup += `&nbsp;&nbsp;Direction: ${{p.wind_direction?.toFixed(0) || 'N/A'}}°<br>`;
+            popup += `&nbsp;&nbsp;Gusts: ${{p.wind_gusts?.toFixed(1) || 'N/A'}} m/s<br>`;
+            popup += `<br><strong>Waves</strong><br>`;
+            popup += `&nbsp;&nbsp;Height: ${{p.wave_height?.toFixed(2) || 'N/A'}} m<br>`;
+            popup += `&nbsp;&nbsp;Direction: ${{p.wave_direction?.toFixed(0) || 'N/A'}}°<br>`;
+            popup += `&nbsp;&nbsp;Period: ${{p.wave_period?.toFixed(1) || 'N/A'}} s<br>`;
+            popup += `&nbsp;&nbsp;Wind waves: ${{p.wind_wave_height?.toFixed(2) || 'N/A'}} m<br>`;
+            popup += `&nbsp;&nbsp;Swell: ${{p.swell_wave_height?.toFixed(2) || 'N/A'}} m<br>`;
+            popup += `<br><strong>Current</strong><br>`;
+            popup += `&nbsp;&nbsp;Velocity: ${{p.current_velocity?.toFixed(2) || 'N/A'}} m/s<br>`;
+            popup += `&nbsp;&nbsp;Direction: ${{p.current_direction?.toFixed(0) || 'N/A'}}°<br>`;
+            popup += `<br><strong>Atmosphere</strong><br>`;
+            popup += `&nbsp;&nbsp;Temp: ${{p.temperature?.toFixed(1) || 'N/A'}}°C<br>`;
+            popup += `&nbsp;&nbsp;Humidity: ${{p.humidity?.toFixed(0) || 'N/A'}}%<br>`;
+            popup += `&nbsp;&nbsp;Pressure: ${{p.pressure?.toFixed(1) || 'N/A'}} hPa<br>`;
+            popup += `<br><small style="color: #666;">${{p.timestamp || 'N/A'}}</small>`;
           }} else {{
-            popup += '<em>${{"No weather data"}}</em>';
+            popup += '<em style="color: #999;">No weather data available</em><br>';
+            popup += '<small>Click "Fetch Weather Data" button to get data</small>';
           }}
 
-          return L.marker(ll, {{
+          popup += `</div>`;
+
+          // Wybierz klasę CSS w zależności od strefy i dostępności danych
+          let markerClass = 'weather-point';
+          if (!hasData) {{
+            markerClass += ' weather-point-nodata';
+          }} else {{
+            if (zone === 'route') {{
+              markerClass += ' weather-point-route';
+            }} else if (zone === 'near') {{
+              markerClass += ' weather-point-near';
+            }} else if (zone === 'mid') {{
+              markerClass += ' weather-point-mid';
+            }} else if (zone === 'far') {{
+              markerClass += ' weather-point-far';
+            }}
+          }}
+
+          // Rozmiar zależy od strefy
+          let iconSize = 16;
+          if (zone === 'route') iconSize = 14;
+          else if (zone === 'near') iconSize = 16;
+          else if (zone === 'mid') iconSize = 13;
+          else if (zone === 'far') iconSize = 10;
+
+          const marker = L.marker(ll, {{
             icon: L.divIcon({{
-              className: hasData ? 'weather-point' : 'weather-point weather-point-nodata',
-              iconSize: [12, 12]
+              className: markerClass,
+              iconSize: [iconSize, iconSize],
+              iconAnchor: [iconSize/2, iconSize/2]
             }})
-          }}).bindPopup(popup);
+          }});
+
+          marker.bindPopup(popup, {{
+            maxWidth: 300,
+            className: 'weather-popup'
+          }});
+
+          // Dodaj event listener na kliknięcie - automatyczne otwieranie popupu
+          marker.on('click', function(e) {{
+            marker.openPopup();
+          }});
+
+          return marker;
         }}
       }}).addTo(map);
 
       const count = data.features?.length || 0;
-      const hasData = data.features?.some(f => f.properties.has_data);
-      document.getElementById('stats').innerHTML += `<br>Weather: ${{count}} points ${{hasData ? '(with data)' : '(no data)'}}`;
+      const hasData = data.features?.filter(f => f.properties.has_data).length || 0;
+      console.log(`Weather points loaded: ${{count}} total, ${{hasData}} with data`);
+
+      document.getElementById('stats').innerHTML += `<br>Weather: ${{count}} points (${{hasData}} with data)`;
+    }})
+    .catch(err => {{
+      console.error('Error loading weather points:', err);
     }});
 }}
 
@@ -403,7 +629,7 @@ document.getElementById('fetch-weather-btn').addEventListener('click', async fun
 
     statusDiv.innerHTML = `
       <small style="color: green;">
-        Success!<br>
+        ✓ Success!<br>
         Points: ${{result.total_points}}<br>
         Successful: ${{result.successful}}<br>
         Cache hits: ${{result.cache_hits}}<br>
@@ -416,7 +642,7 @@ document.getElementById('fetch-weather-btn').addEventListener('click', async fun
 
   }} catch (error) {{
     console.error('Error fetching weather:', error);
-    statusDiv.innerHTML = `<small style="color: red;"> Error: ${{error.message}}</small>`;
+    statusDiv.innerHTML = `<small style="color: red;">✗ Error: ${{error.message}}</small>`;
   }} finally {{
     btn.disabled = false;
     btn.textContent = 'Fetch Weather Data';

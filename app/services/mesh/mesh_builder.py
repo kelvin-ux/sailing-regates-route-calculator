@@ -22,6 +22,7 @@ from app.schemas.mesh import CreateRouteAndMeshIn
 from app.schemas.db_create import RouteCreate
 from app.schemas.db_create import RoutePointCreate
 from app.schemas.db_create import MeshedAreaCreate
+from app.schemas.WeatherMeshConfig import WeatherMeshConfig
 
 from app.models.models import RoutePointType
 
@@ -38,24 +39,17 @@ from app.services.geodata.bathymetry import WcsRequest
 from app.services.geodata.bathymetry import shallow_mask_from_tif
 from app.services.geodata.bathymetry import _bbox_wgs84_from_local_wkt
 from app.services.geodata.bathymetry import fetch_wcs_geotiff
+from app.services.mesh.zones import ZonalWeatherPointSelector
+
+
 
 COAST_CLEAR_M = 500.0
 COAST_SIMPLY = 20.0
-MAX_WEATHER_POINTS = 50
-WEATHER_GRID_KM = 5.0
-WEATHER_GRID_M = 5000.0
 WEATHER_CACHE_TTL = 3600
 DRAFT_M = 2.2
 CLEARANCE_M = 0.5
 THRESHOLD = DRAFT_M + CLEARANCE_M
 
-
-@dataclass
-class WeatherMeshConfig:
-    max_points: int = MAX_WEATHER_POINTS
-    grid_spacing_m: float = WEATHER_GRID_M
-    priority_route_points: int = 20
-    cluster_method: str = "kmeans"
 
 
 @dataclass
@@ -261,7 +255,7 @@ async def create_route_and_mesh(session: AsyncSession, payload: CreateRouteAndMe
             route_xy = safe_line
             corridor_xy = route_xy.buffer(buffer_m, cap_style=2, join_style=2)
 
-    route_ll = _to_proj(route_xy, local_crs, CRS.from_epsg(4326))  # ← powrót do WGS84
+    route_ll = _to_proj(route_xy, local_crs, CRS.from_epsg(4326))
     coords_ll = list(route_ll.coords)
 
     base = len(payload.points)
@@ -281,7 +275,7 @@ async def create_route_and_mesh(session: AsyncSession, payload: CreateRouteAndMe
         seq += 1
 
 
-    STEP_M = 29.0
+    STEP_M = 300.0
     L = float(route_xy.length)
 
     d = STEP_M
@@ -318,7 +312,7 @@ async def create_route_and_mesh(session: AsyncSession, payload: CreateRouteAndMe
     if nav_vertices is None or nav_triangles is None or len(nav_vertices) == 0:
         raise RuntimeError("Navigation mesh triangulation failed")
 
-    selector = WeatherPointSelector(weather_config)
+    selector = ZonalWeatherPointSelector(weather_config)
     weather_points = selector.select_points(
         nav_vertices,
         route_xy,
