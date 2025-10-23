@@ -12,5 +12,8 @@ class WeatherMeshConfig:
     cluster_method: str = "kmeans"
     near_zone_m: float = 500.0
     mid_zone_m: float = 1500.0
-    fat_zone_m: float = 3000.0
+    far_zone_m: float = 3000.0
     rdr: float = 0.3 # amount of points in near zone
+    near_zone_ratio: float = 0.3
+    mid_zone_ratio: float = 0.4
+    far_zone_ratio: float = 0.33

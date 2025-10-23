@@ -19,48 +19,57 @@ class ZonalWeatherPointSelector:
 
     def select_points(self, navigation_vertices: np.ndarray, route_line: LineString, water_poly) -> List[
         Tuple[float, float]]:
-        """Główna metoda wyboru punktów z uwzględnieniem stref"""
+        """Główna metoda wyboru punktów z uwzględnieniem stref
 
-        route_points_count = int(self.config.priority_route_points * (1 - self.config.rdr))
-        route_points = self._sample_along_route(route_line, route_points_count)
+
+        - Strefa near: równomiernie wzdłuż trasy
+        - Strefa mid: równomierna siatka punktów, każdy punkt ma swoje pole
+        - Strefa far: równomierna siatka punktów, każdy punkt ma swoje pole
+        """
 
         vertices_by_zone = self._classify_vertices_by_zone(navigation_vertices, route_line)
 
-        remaining = self.config.max_points - len(route_points)
+        total_points = self.config.max_points
 
-        # Proporcje: near=1.0, mid=0.25, far=0.125
-        near_count = int(remaining * (1.0 / 1.375))
-        mid_count = int(remaining * (0.25 / 1.375))
-        far_count = remaining - near_count - mid_count
+        near_count = int(total_points * 0.4)
+        mid_count = int(total_points * 0.4)
+        far_count = total_points - near_count - mid_count  # Reszta idzie do far
 
-        near_points = self._select_in_zone(
-            vertices_by_zone['near'],
-            near_count,
+        near_points = self._sample_along_route_in_zone(
             route_line,
-            zone_type='near'
+            near_count,
+            max_distance=self.config.near_zone_m
         )
 
-        mid_points = self._select_in_zone(
+        mid_points = self._select_grid_based(
             vertices_by_zone['mid'],
             mid_count,
             route_line,
-            zone_type='mid'
+            min_distance=self.config.near_zone_m,
+            max_distance=self.config.mid_zone_m
         )
 
-        far_points = self._select_in_zone(
+        far_points = self._select_grid_based(
             vertices_by_zone['far'],
             far_count,
             route_line,
-            zone_type='far'
+            min_distance=self.config.mid_zone_m,
+            max_distance=self.config.far_zone_m
         )
 
-        all_points = route_points + near_points + mid_points + far_points
+        all_points = near_points + mid_points + far_points
         all_points = self._remove_duplicates(all_points, min_distance_m=100.0)
 
         return all_points[:self.config.max_points]
 
     def _classify_vertices_by_zone(self, vertices: np.ndarray, route_line: LineString) -> Dict[str, np.ndarray]:
-        """Klasyfikuje wierzchołki według odległości od trasy"""
+        """Klasyfikuje wierzchołki według odległości od trasy
+
+        Strefy:
+        - near: <= near_zone_m
+        - mid: near_zone_m < d <= mid_zone_m
+        - far: > mid_zone_m
+        """
         distances = np.array([route_line.distance(Point(v[0], v[1])) for v in vertices])
 
         near_mask = distances <= self.config.near_zone_m
@@ -73,177 +82,144 @@ class ZonalWeatherPointSelector:
             'far': vertices[far_mask]
         }
 
-    def _select_in_zone(self, vertices: np.ndarray, count: int, route_line: LineString, zone_type: str) -> List[
+    def _sample_along_route_in_zone(self, route: LineString, count: int, max_distance: float) -> List[
         Tuple[float, float]]:
-        """Wybiera punkty w danej strefie z odpowiednią strategią"""
-
-        if len(vertices) == 0 or count <= 0:
-            return []
-
-        if zone_type == 'near':
-            # Strefa bliska: regularna gęstość, k-means
-            return self._select_uniform(vertices, count)
-
-        elif zone_type == 'mid':
-            # Strefa średnia: naprzemiennie po obu stronach trasy
-            return self._select_alternating(vertices, count, route_line)
-
-        elif zone_type == 'far':
-            # Strefa daleka: symetrycznie po obu stronach
-            return self._select_symmetric(vertices, count, route_line)
-
-        return []
-
-    def _select_uniform(self, vertices: np.ndarray, count: int) -> List[Tuple[float, float]]:
-        """Wybór równomierny (k-means clustering)"""
-        if len(vertices) <= count:
-            return [(float(v[0]), float(v[1])) for v in vertices]
-
-        kmeans = KMeans(n_clusters=count, random_state=42, n_init=10)
-        kmeans.fit(vertices)
-        centers = kmeans.cluster_centers_
-
-        return [(float(c[0]), float(c[1])) for c in centers]
-
-    def _select_alternating(self, vertices: np.ndarray, count: int, route_line: LineString) -> List[
-        Tuple[float, float]]:
-        """Wybór naprzemiennie po obu stronach trasy (zygzak)"""
-
-        if len(vertices) == 0:
-            return []
-
-        left_points = []
-        right_points = []
-
-        for v in vertices:
-            point = Point(v[0], v[1])
-            closest_point = route_line.interpolate(route_line.project(point))
-
-            side = self._point_side(point, closest_point, route_line)
-
-            if side > 0:
-                left_points.append(v)
-            else:
-                right_points.append(v)
-
-        left_points = np.array(left_points) if left_points else np.array([]).reshape(0, 2)
-        right_points = np.array(right_points) if right_points else np.array([]).reshape(0, 2)
-
-        count_per_side = count // 2
-
-        left_selected = self._select_uniform(left_points, count_per_side) if len(left_points) > 0 else []
-        right_selected = self._select_uniform(right_points, count - count_per_side) if len(right_points) > 0 else []
-
-        result = []
-        for i in range(max(len(left_selected), len(right_selected))):
-            if i < len(left_selected):
-                result.append(left_selected[i])
-            if i < len(right_selected):
-                result.append(right_selected[i])
-
-        return result
-
-    def _select_symmetric(self, vertices: np.ndarray, count: int, route_line: LineString) -> List[Tuple[float, float]]:
-        """Wybór symetryczny po obu stronach trasy"""
-
-        if len(vertices) == 0:
-            return []
-
-        left_points = []
-        right_points = []
-
-        for v in vertices:
-            point = Point(v[0], v[1])
-            closest_point = route_line.interpolate(route_line.project(point))
-            side = self._point_side(point, closest_point, route_line)
-
-            if side > 0:
-                left_points.append(v)
-            else:
-                right_points.append(v)
-
-        left_points = np.array(left_points) if left_points else np.array([]).reshape(0, 2)
-        right_points = np.array(right_points) if right_points else np.array([]).reshape(0, 2)
-
-        count_per_side = count // 2
-
-        left_selected = self._select_uniform(left_points, count_per_side) if len(left_points) > 0 else []
-        right_selected = self._select_uniform(right_points, count_per_side) if len(right_points) > 0 else []
-
-        left_sorted = self._sort_along_route(left_selected, route_line)
-        right_sorted = self._sort_along_route(right_selected, route_line)
-
-        result = []
-        for l, r in zip(left_sorted, right_sorted):
-            result.append(l)
-            result.append(r)
-
-        if len(left_sorted) > len(right_sorted):
-            result.extend(left_sorted[len(right_sorted):])
-        elif len(right_sorted) > len(left_sorted):
-            result.extend(right_sorted[len(left_sorted):])
-
-        return result
-
-    def _point_side(self, point: Point, ref_point: Point, route_line: LineString) -> float:
-        """Określa po której stronie trasy jest punkt"""
-
-        distance_along = route_line.project(ref_point)
-
-        segment_start = max(0, distance_along - 10)
-        segment_end = min(route_line.length, distance_along + 10)
-
-        start_pt = route_line.interpolate(segment_start)
-        end_pt = route_line.interpolate(segment_end)
-
-        dx = end_pt.x - start_pt.x
-        dy = end_pt.y - start_pt.y
-
-        px = point.x - ref_point.x
-        py = point.y - ref_point.y
-
-        cross = dx * py - dy * px
-
-        return cross
-
-    def _sort_along_route(self, points: List[Tuple[float, float]], route_line: LineString) -> List[Tuple[float, float]]:
-        if not points:
-            return []
-
-        points_with_distance = []
-        for p in points:
-            point_geom = Point(p[0], p[1])
-            distance_along = route_line.project(point_geom)
-            points_with_distance.append((distance_along, p))
-
-        points_with_distance.sort(key=lambda x: x[0])
-        return [p for _, p in points_with_distance]
-
-    def _remove_duplicates(self, points: List[Tuple[float, float]], min_distance_m: float) -> List[Tuple[float, float]]:
-        if len(points) <= 1:
-            return points
-
-        result = [points[0]]
-        tree = KDTree([points[0]])
-
-        for p in points[1:]:
-            distances, _ = tree.query(p, k=1)
-            if distances > min_distance_m:
-                result.append(p)
-                tree = KDTree(result)
-
-        return result
-
-    def _sample_along_route(self, route: LineString, n: int) -> List[Tuple[float, float]]:
-        if n <= 0:
+        """
+        Próbkuje punkty równomiernie wzdłuż trasy, z możliwością przesunięcia w bok
+        """
+        if count <= 0:
             return []
 
         total_len = route.length
-        pts: List[Tuple[float, float]] = []
+        points = []
 
-        for i in range(n):
-            dist = (i / (n - 1)) * total_len if n > 1 else 0
+        for i in range(count):
+            if count == 1:
+                dist = total_len / 2
+            else:
+                dist = (i / (count - 1)) * total_len
+
             p = route.interpolate(dist)
-            pts.append((p.x, p.y))
 
-        return pts
+            if i % 2 == 0:
+                offset = min(50.0, max_distance * 0.1)
+            else:
+                offset = -min(50.0, max_distance * 0.1)
+
+            if dist > 10 and dist < total_len - 10:
+                p_before = route.interpolate(dist - 10)
+                p_after = route.interpolate(dist + 10)
+                dx = p_after.x - p_before.x
+                dy = p_after.y - p_before.y
+                length = np.sqrt(dx * dx + dy * dy)
+                if length > 0:
+                    nx = -dy / length * offset
+                    ny = dx / length * offset
+                    points.append((p.x + nx, p.y + ny))
+                else:
+                    points.append((p.x, p.y))
+            else:
+                points.append((p.x, p.y))
+
+        return points
+
+    def _select_grid_based(self, vertices: np.ndarray, count: int, route_line: LineString,
+                           min_distance: float, max_distance: float) -> List[Tuple[float, float]]:
+        """Wybór punktów na równomiernej siatce w danej strefie
+
+        Tworzy regularną siatkę punktów w strefie między min_distance a max_distance od trasy.
+        Każdy punkt ma swoje własne "pole" o podobnej wielkości.
+        """
+        if len(vertices) == 0 or count <= 0:
+            return []
+
+        route_length = route_line.length
+
+        avg_distance = (min_distance + max_distance) / 2.0
+
+        zone_width = max_distance - min_distance
+        zone_length = route_length
+
+        zone_area = 2 * zone_width * zone_length
+
+        area_per_point = zone_area / max(count, 1)
+
+        optimal_spacing = np.sqrt(area_per_point)
+
+        points_along = max(1, int(zone_length / optimal_spacing))
+        points_across = max(1, int(count / points_along))
+
+        while points_along * points_across * 2 > count:  # *2 bo po obu stronach
+            if points_along > points_across:
+                points_along -= 1
+            else:
+                points_across -= 1
+            if points_along < 1 or points_across < 1:
+                points_along = max(1, points_along)
+                points_across = max(1, points_across)
+                break
+
+        selected_points = []
+
+        for i in range(points_along):
+            if points_along == 1:
+                dist_along = route_length / 2
+            else:
+                dist_along = (i / (points_along - 1)) * route_length
+
+            route_point = route_line.interpolate(dist_along)
+
+            if dist_along > 10 and dist_along < route_length - 10:
+                p_before = route_line.interpolate(dist_along - 10)
+                p_after = route_line.interpolate(dist_along + 10)
+                dx = p_after.x - p_before.x
+                dy = p_after.y - p_before.y
+                length = np.sqrt(dx * dx + dy * dy)
+
+                if length > 0:
+                    nx = -dy / length
+                    ny = dx / length
+                else:
+                    nx, ny = 0, 1
+            else:
+                nx, ny = 0, 1
+
+            for j in range(points_across):
+                if points_across == 1:
+                    distance = avg_distance
+                else:
+                    distance = min_distance + (j + 0.5) * zone_width / points_across
+
+                left_x = route_point.x + nx * distance
+                left_y = route_point.y + ny * distance
+                selected_points.append((left_x, left_y))
+
+                right_x = route_point.x - nx * distance
+                right_y = route_point.y - ny * distance
+                selected_points.append((right_x, right_y))
+
+                if len(selected_points) >= count:
+                    break
+
+            if len(selected_points) >= count:
+                break
+
+        if len(vertices) > 0 and len(selected_points) > 0:
+            final_points = []
+            vertices_tree = KDTree(vertices)
+
+            for grid_point in selected_points[:count]:
+                dist, idx = vertices_tree.query(grid_point, k=1)
+                if dist < zone_width:
+                    vertex = vertices[idx]
+                    vertex_dist = route_line.distance(Point(vertex[0], vertex[1]))
+                    if min_distance <= vertex_dist <= max_distance:
+                        final_points.append((float(vertex[0]), float(vertex[1])))
+                    else:
+                        final_points.append(grid_point)
+                else:
+                    final_points.append(grid_point)
+
+            return final_points[:count]
+        else:
+            return selected_points[:count]
