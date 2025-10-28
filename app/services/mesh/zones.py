@@ -223,3 +223,17 @@ class ZonalWeatherPointSelector:
             return final_points[:count]
         else:
             return selected_points[:count]
+    def _remove_duplicates(self, points: List[Tuple[float, float]], min_distance_m: float) -> List[Tuple[float, float]]:
+        if len(points) <= 1:
+            return points
+
+        result = [points[0]]
+        tree = KDTree([points[0]])
+
+        for p in points[1:]:
+            distances, _ = tree.query(p, k=1)
+            if distances > min_distance_m:
+                result.append(p)
+                tree = KDTree(result)
+
+        return result
