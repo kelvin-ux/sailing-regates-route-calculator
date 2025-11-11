@@ -88,7 +88,7 @@ class Yacht(Base):
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), default=uuid4, primary_key=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     yacht_type: Mapped[YachtType] = mapped_column(Enum(YachtType), nullable=False)
-    length: Mapped[float] = mapped_column(Float, nullable=False, comment="Length in meters")
+    length: Mapped[float] = mapped_column(Float, nullable=False, comment="Length in feet")
     beam: Mapped[float] = mapped_column(Float, nullable=False, comment="Beam in meters")
     sail_number: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     has_spinnaker: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -98,6 +98,8 @@ class Yacht(Base):
     max_wind_speed: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Maximum safe wind speed")
     draft: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Draft in meters")
     amount_of_crew: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="Crew size")
+    tack_time: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Average tack time")
+    jibe_time: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Average jibe time")
 
     
     routes: Mapped[List["Route"]] = relationship("Route", back_populates="yacht")

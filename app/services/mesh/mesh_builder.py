@@ -118,7 +118,6 @@ class WeatherPointSelector:
         """Wybór przez regularną siatkę"""
         bounds = water_polygon.bounds  # (minx, miny, maxx, maxy)
 
-        # Oblicz liczbę punktów gridu w każdym wymiarze
         width = bounds[2] - bounds[0]
         height = bounds[3] - bounds[1]
 
