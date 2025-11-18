@@ -26,7 +26,7 @@ from app.schemas.WeatherMeshConfig import WeatherMeshConfig
 
 from app.models.models import RoutePointType
 
-from app.services.db.services import MeshedAreaService
+from app.services.db.services import MeshedAreaService, YachtService
 from app.services.db.services import RoutePointService
 from app.services.db.services import RouteService
 from app.services.geodata.corridor import _to_proj
@@ -187,6 +187,10 @@ async def create_route_and_mesh(session: AsyncSession, payload: CreateRouteAndMe
     route_svc = RouteService(session)
     rpoint_svc = RoutePointService(session)
     mesh_svc = MeshedAreaService(session)
+    yacht_svc = YachtService(session)
+
+    if await yacht_svc.get_entity_by_id(payload.yacht_id) is None:
+        raise ValueError("Provide valid yacht id")
 
     ctrl_json = json.dumps([[p.lon, p.lat] for p in payload.points])
     route = await route_svc.create_entity(
