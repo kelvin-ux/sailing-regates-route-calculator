@@ -269,6 +269,8 @@ class MeshedArea(Base):
 
     nodes_json: Mapped[str] = mapped_column(Text, nullable=False, comment="[[x,y],...] w lokalnym CRS (metry)")
     triangles_json: Mapped[str] = mapped_column(Text, nullable=False, comment="[[i,j,k],...] indeksy węzłów")
+    calculated_route_json = Column(Text, nullable=True)
+    calculated_route_timestamp = Column(DateTime, nullable=True)
 
     water_wkt: Mapped[str] = mapped_column(Text, nullable=False)
     route_wkt: Mapped[str] = mapped_column(Text, nullable=False)

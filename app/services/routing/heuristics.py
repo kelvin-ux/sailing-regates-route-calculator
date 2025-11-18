@@ -128,7 +128,7 @@ class SailingHeuristics:
         comfort_penalty = self._calculate_comfort_penalty(to_conditions)
         time_cost *= (1.0 + comfort_penalty)
 
-        log_edge(from_idx, to_idx, to_twa, boat_speed, avg_wind_speed_ms)
+        log_edge(from_idx, to_idx, to_twa, boat_speed, avg_wind_speed_ms, time_cost)
 
         if boat_speed <= 0.01:
             log_impassable(from_idx, to_idx, "boat_speed=0")

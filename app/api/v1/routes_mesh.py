@@ -40,23 +40,28 @@ async def create_route_and_mesh_ep(
 
     Przykładowe dane:
     ```json
-    {
+       {
       "user_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-      "yacht_id": "0f470c56-523b-4a82-94c0-4c1cb7b4a0bf",
+      "yacht_id": "f0dde3aa-64a0-4c10-a512-e0b3391b2d1f",
       "points": [
         {
-          "lat": 54.520,
-          "lon": 18.550,
+          "lat": 54.529300,
+          "lon": 18.580623,
           "timestamp": null
         },
         {
-          "lat": 54.400,
-          "lon": 18.700,
+          "lat": 54.568123,
+          "lon": 18.833836,
           "timestamp": null
         },
         {
-          "lat": 54.350,
-          "lon": 18.900,
+          "lat": 54.488631,
+          "lon": 19.162806,
+          "timestamp": null
+        },
+        {
+          "lat": 54.372730,
+          "lon": 18.952660,
           "timestamp": null
         }
       ],
