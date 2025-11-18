@@ -47,7 +47,7 @@ class SailingHeuristics:
         # Sailing constants - use yacht-specific times if available
         self.TACKING_PENALTY = (yacht.tack_time * 60.0) if yacht.tack_time else 120.0
         self.GYBING_PENALTY = (yacht.jibe_time * 60.0) if yacht.jibe_time else 90.0
-        self.DEAD_ANGLE = 25.0  # Reduced from 30 to be less restrictive
+        self.DEAD_ANGLE = 30.0  # Reduced from 30 to be less restrictive
         self.COMFORT_WAVE_HEIGHT = 4.0
         self.MAX_HEEL_ANGLE = 40.0
 

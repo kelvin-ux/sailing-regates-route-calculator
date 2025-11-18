@@ -190,12 +190,12 @@ async def calculate_optimal_route(
             idx = wp.seq_idx - 1000
 
             weather_dict = {
-                'wind_speed_10m': forecast.wind_speed / 0.514444 if forecast.wind_speed else None,  # m/s to knots
+                'wind_speed_10m': forecast.wind_speed if forecast.wind_speed else None,
                 'wind_direction_10m': forecast.wind_direction,
                 'wave_height': forecast.wave_height,
                 'wave_direction': forecast.wave_direction,
                 'wave_period': forecast.wave_period,
-                'current_speed': forecast.current_velocity / 0.514444 if forecast.current_velocity else None,
+                'current_speed': forecast.current_velocity if forecast.current_velocity else None,
                 'current_direction': forecast.current_direction,
             }
 
@@ -502,7 +502,7 @@ async def calculate_optimal_route(
                     "distance_nm": float(distance / 1852.0),
                     "bearing": float(bearing),
                     "time_seconds": float(segment_cost),
-                    "boat_speed_knots": float(boat_speed / 0.514444),
+                    "boat_speed_knots": float(boat_speed),
                     "wind_speed_knots": float(conditions.wind_speed),
                     "wind_direction": float(conditions.wind_direction),
                     "twa": float(twa),
