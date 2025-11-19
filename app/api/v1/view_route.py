@@ -5,6 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import APIRouter, Depends, HTTPException
 from app.core.database import get_db as get_async_session
 from app.services.db.services import MeshedAreaService
+from sqlalchemy import select
+from app.models.models import RouteSegments, RoutePoint
+import json
 
 router = APIRouter()
 
@@ -26,14 +29,69 @@ async def view_calculated_route(
             media_type="text/html; charset=utf-8"
         )
 
-    route_api_url = f"/api/v1/routing/{meshed_area_id}/calculated-route"
+    # Pobierz zoptymalizowane segmenty z bazy danych
+    segments_query = (
+        select(RouteSegments)
+        .where(RouteSegments.route_id == meshed.route_id)
+        .order_by(RouteSegments.segment_order)
+    )
+
+    result = await session.execute(segments_query)
+    db_segments = result.scalars().all()
+
+    # Przygotuj dane segmentów do wyświetlenia
+    segments_data = []
+    for seg in db_segments:
+        # Pobierz punkty początkowy i końcowy
+        from_point = await session.get(RoutePoint, seg.from_point)
+        to_point = await session.get(RoutePoint, seg.to_point)
+
+        if from_point and to_point:
+            segments_data.append({
+                'order': seg.segment_order,
+                'from': {'lat': from_point.y, 'lon': from_point.x},
+                'to': {'lat': to_point.y, 'lon': to_point.x},
+                'distance_nm': seg.distance_nm,
+                'bearing': seg.bearing,
+                'estimated_time_hours': seg.estimated_time / 60.0 if seg.estimated_time else 0,
+                'recommended_course': seg.recommended_course,
+                'wind_angle': seg.wind_angle,
+                'sail_type': seg.sail_type,
+                'tack_type': seg.tack_type,
+                'maneuver_type': seg.maneuver_type,
+                'boat_speed_knots': (seg.distance_nm / (
+                            seg.estimated_time / 60.0)) if seg.estimated_time and seg.estimated_time > 0 else 0
+            })
+
+    # Jeśli nie ma segmentów w bazie, użyj danych z calculated_route_json
+    if not segments_data and meshed.calculated_route_json:
+        route_data = json.loads(meshed.calculated_route_json)
+        # Fallback to raw segments
+        if 'route' in route_data and 'segments' in route_data['route']:
+            for idx, seg in enumerate(route_data['route']['segments']):
+                segments_data.append({
+                    'order': idx,
+                    'from': {'lat': seg['from']['lat'], 'lon': seg['from']['lon']},
+                    'to': {'lat': seg['to']['lat'], 'lon': seg['to']['lon']},
+                    'distance_nm': seg['distance_nm'],
+                    'bearing': seg['bearing'],
+                    'estimated_time_hours': seg['time_seconds'] / 3600.0,
+                    'wind_angle': seg.get('twa', 0),
+                    'sail_type': 'unknown',
+                    'tack_type': seg.get('point_of_sail', 'unknown'),
+                    'maneuver_type': None,
+                    'boat_speed_knots': seg.get('boat_speed_knots', 0)
+                })
+
+    # Przygotuj JSON dla JavaScript
+    segments_json = json.dumps(segments_data)
 
     html = f"""<!DOCTYPE html>
 <html lang="pl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Route View - {meshed_area_id}</title>
+    <title>Optimized Route View - {meshed_area_id}</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
         * {{
@@ -95,38 +153,8 @@ async def view_calculated_route(
             color: #ffffff;
             font-weight: 600;
         }}
-        .legend {{
-            background: rgba(255,255,255,0.05);
-            padding: 12px;
-            border-radius: 4px;
-            margin: 15px 0;
-            border: 1px solid rgba(255,255,255,0.1);
-            font-size: 12px;
-        }}
-        .legend-item {{
-            display: flex;
-            align-items: center;
-            margin: 6px 0;
-        }}
-        .legend-color {{
-            width: 16px;
-            height: 16px;
-            border-radius: 3px;
-            margin-right: 8px;
-            border: 1px solid rgba(255,255,255,0.3);
-        }}
-        .legend-text {{
-            font-size: 11px;
-        }}
-        .tack-legend {{
-            background: rgba(255,255,255,0.03);
-            padding: 10px;
-            border-radius: 4px;
-            margin: 10px 0;
-            font-size: 11px;
-        }}
         .segment-list {{
-            max-height: 350px;
+            max-height: 400px;
             overflow-y: auto;
             margin-top: 10px;
         }}
@@ -139,6 +167,7 @@ async def view_calculated_route(
             transition: all 0.2s;
             border-left: 3px solid #666;
             font-size: 12px;
+            position: relative;
         }}
         .segment-item:hover {{
             background: rgba(79, 195, 247, 0.2);
@@ -148,14 +177,22 @@ async def view_calculated_route(
             background: rgba(79, 195, 247, 0.3);
             border-left-color: #81c784;
         }}
-        .segment-pos {{
-            display: inline-block;
+        .maneuver-badge {{
+            position: absolute;
+            top: 5px;
+            right: 5px;
             padding: 2px 6px;
             border-radius: 3px;
             font-size: 10px;
             font-weight: 600;
-            margin-right: 8px;
             color: white;
+            text-transform: uppercase;
+        }}
+        .maneuver-tack {{
+            background: #9b59b6;
+        }}
+        .maneuver-jibe {{
+            background: #1abc9c;
         }}
         .loading {{
             position: fixed;
@@ -182,14 +219,6 @@ async def view_calculated_route(
             0% {{ transform: rotate(0deg); }}
             100% {{ transform: rotate(360deg); }}
         }}
-        .error {{
-            background: rgba(244, 67, 54, 0.9);
-            color: white;
-            padding: 15px;
-            border-radius: 4px;
-            margin: 10px;
-            font-size: 13px;
-        }}
         .legend-box {{
             position: absolute;
             bottom: 20px;
@@ -208,124 +237,47 @@ async def view_calculated_route(
             margin-bottom: 8px;
             font-size: 13px;
         }}
-        .info-panel::-webkit-scrollbar,
-        .segment-list::-webkit-scrollbar {{
-            width: 6px;
-        }}
-        .info-panel::-webkit-scrollbar-track,
-        .segment-list::-webkit-scrollbar-track {{
-            background: rgba(255,255,255,0.05);
-        }}
-        .info-panel::-webkit-scrollbar-thumb,
-        .segment-list::-webkit-scrollbar-thumb {{
-            background: #4fc3f7;
-            border-radius: 3px;
-        }}
     </style>
 </head>
 <body>
     <div id="map"></div>
     <div class="legend-box">
-        <div class="legend-title">Hals (Punkt zeglugi)</div>
-        <div class="legend">
-            <div class="legend-item">
-                <div class="legend-color" style="background: #e74c3c;"></div>
-                <div class="legend-text">Baksztag 110-160°</div>
-            </div>
-            <div class="legend-item">
-                <div class="legend-color" style="background: #e67e22;"></div>
-                <div class="legend-text">Polbaksztag 80-110°</div>
-            </div>
-            <div class="legend-item">
-                <div class="legend-color" style="background: #f39c12;"></div>
-                <div class="legend-text">Polwiatr 70-110°</div>
-            </div>
-            <div class="legend-item">
-                <div class="legend-color" style="background: #27ae60;"></div>
-                <div class="legend-text">Bajdewind 30-70°</div>
-            </div>
-            <div class="legend-item">
-                <div class="legend-color" style="background: #3498db;"></div>
-                <div class="legend-text">Kurs pelny 160-180°</div>
-            </div>
-            <div class="legend-item">
-                <div class="legend-color" style="background: #888888;"></div>
-                <div class="legend-text">Dead Zone 0-30°</div>
-            </div>
-        </div>
-        <div class="legend-title" style="margin-top: 12px;">Zwroty</div>
-        <div class="tack-legend">
-            <div class="legend-item">
-                <div class="legend-color" style="background: #9b59b6;"></div>
-                <div class="legend-text">¬† Tack (gora 0°)</div>
-            </div>
-            <div class="legend-item">
-                <div class="legend-color" style="background: #1abc9c;"></div>
-                <div class="legend-text">¬‡ Jibe (dolem 180°)</div>
-            </div>
+        <div class="legend-title">Optimized Segments</div>
+        <div style="color: #aaa; font-size: 11px; margin-top: 8px;">
+            Segments: {len(segments_data)}<br>
+            Total Distance: {sum(s['distance_nm'] for s in segments_data):.1f} nm<br>
+            Total Time: {sum(s['estimated_time_hours'] for s in segments_data):.1f} h
         </div>
     </div>
     <div class="info-panel" id="infoPanel">
-        <h2>Informacje o trasie</h2>
+        <h2>Optimized Route Info</h2>
         <div id="routeStats"></div>
-        <h3>Segmenty trasy</h3>
+        <h3>Route Segments ({len(segments_data)})</h3>
         <div class="segment-list" id="segmentList"></div>
     </div>
     <div class="loading" id="loading">
         <div class="loading-spinner"></div>
-        <div>Wczytywanie danych trasy...</div>
+        <div>Loading route data...</div>
     </div>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
         const MESHED_AREA_ID = '{meshed_area_id}';
-        const ROUTE_API_URL = '{route_api_url}';
+        const SEGMENTS_DATA = {segments_json};
 
         let map;
-        let routeLayer;
-        let waypointMarkers = [];
         let segmentPolylines = [];
-        let tackMarkers = [];
+        let maneuverMarkers = [];
         let selectedSegmentIndex = null;
 
-        const posColors = {{
-            'dead-zone': '#888888',
+        const tackColors = {{
             'close-hauled': '#e74c3c',
-            'close-reach': '#e67e22',
-            'beam-reach': '#f39c12',
-            'broad-reach': '#27ae60',
-            'running': '#3498db'
+            'close reach': '#e67e22',
+            'beam reach': '#f39c12',
+            'broad reach': '#27ae60',
+            'running': '#3498db',
+            'dead run': '#2980b9',
+            'no-go zone': '#888888'
         }};
-
-        function classifyHals(twa) {{
-            const absTWA = Math.abs(twa);
-            if (absTWA <= 30) return 'dead-zone';
-            if (absTWA <= 70) return 'broad-reach';
-            if (absTWA <= 110) return 'beam-reach';
-            if (absTWA <= 160) return 'close-hauled';
-            return 'running';
-        }}
-
-        function getPosEnglish(hals) {{
-            const map = {{
-                'dead-zone': 'dead-zone',
-                'broad-reach': 'broad-reach',
-                'beam-reach': 'beam-reach',
-                'close-hauled': 'close-hauled',
-                'running': 'running'
-            }};
-            return map[hals] || 'beam-reach';
-        }}
-
-        function getHalsPolish(hals) {{
-            const map = {{
-                'dead-zone': 'Dead Zone',
-                'broad-reach': 'Bajdewind',
-                'beam-reach': 'Polwiatr',
-                'close-hauled': 'Baksztag',
-                'running': 'Kurs pelny'
-            }};
-            return map[hals] || hals;
-        }}
 
         function initMap() {{
             map = L.map('map').setView([54.5, 18.5], 10);
@@ -336,166 +288,141 @@ async def view_calculated_route(
             }}).addTo(map);
         }}
 
-        async function loadRoute() {{
-            try {{
-                const response = await fetch(ROUTE_API_URL);
-                if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
-                const result = await response.json();
-                const routeData = result.data;
-                displayRoute(routeData);
-                displayStats(routeData);
-                displaySegments(routeData);
-                document.getElementById('loading').style.display = 'none';
-            }} catch (error) {{
-                console.error('Error:', error);
-                document.getElementById('loading').innerHTML = `<div class="error"><strong>Blad wczytywania trasy</strong><br>${{error.message}}</div>`;
+        function displayRoute() {{
+            if (!SEGMENTS_DATA || SEGMENTS_DATA.length === 0) {{
+                document.getElementById('loading').innerHTML = '<div style="color: red;">No segment data available</div>';
+                return;
             }}
-        }}
 
-        function displayRoute(routeData) {{
-            const waypoints = routeData.route.waypoints_wgs84;
-            const segments = routeData.route.segments;
-            if (!waypoints || waypoints.length === 0) return;
+            const bounds = L.latLngBounds();
 
-            const latLngs = waypoints.map(wp => [wp[1], wp[0]]);
-            routeLayer = L.polyline(latLngs, {{
-                color: '#666',
-                weight: 2,
-                opacity: 0.3,
-                dashArray: '5, 5'
-            }}).addTo(map);
-
-            segments.forEach((segment, idx) => {{
+            // Draw segments
+            SEGMENTS_DATA.forEach((segment, idx) => {{
                 const from = [segment.from.lat, segment.from.lon];
                 const to = [segment.to.lat, segment.to.lon];
-                const hals = classifyHals(segment.twa);
-                const color = posColors[getPosEnglish(hals)];
+
+                bounds.extend(from);
+                bounds.extend(to);
+
+                const color = tackColors[segment.tack_type] || '#666';
                 const polyline = L.polyline([from, to], {{
                     color: color,
                     weight: 4,
                     opacity: 0.8
                 }}).addTo(map);
+
                 polyline.on('click', () => selectSegment(idx));
                 segmentPolylines.push(polyline);
-            }});
 
-            waypoints.forEach((wp, idx) => {{
-                const color = idx === 0 ? '#4caf50' : (idx === waypoints.length - 1 ? '#f44336' : '#fff');
-                const marker = L.circleMarker([wp[1], wp[0]], {{
-                    radius: 6,
-                    fillColor: color,
-                    color: '#000',
-                    weight: 2,
-                    opacity: 1,
-                    fillOpacity: 0.9
-                }}).addTo(map);
-                marker.bindPopup(`<strong>Wp ${{idx + 1}}</strong><br>Lat: ${{wp[1].toFixed(5)}}<br>Lon: ${{wp[0].toFixed(5)}}`);
-                waypointMarkers.push(marker);
-            }});
-
-            markTacks(segments);
-            map.fitBounds(routeLayer.getBounds(), {{ padding: [50, 50] }});
-        }}
-
-        function markTacks(segments) {{
-            for (let i = 1; i < segments.length; i++) {{
-                const prevSeg = segments[i - 1];
-                const currSeg = segments[i];
-                const prevTWA = prevSeg.twa;
-                const currTWA = currSeg.twa;
-
-                const signChange = (prevTWA > 0 && currTWA < 0) || (prevTWA < 0 && currTWA > 0);
-                if (!signChange) continue;
-
-                const prevAbsTWA = Math.abs(prevTWA);
-                const currAbsTWA = Math.abs(currTWA);
-
-                let tackType = null;
-                let tackColor = null;
-                let tackLabel = null;
-
-                if (prevAbsTWA < 90 || currAbsTWA < 90) {{
-                    tackType = 'tack';
-                    tackColor = '#9b59b6';
-                    tackLabel = 'TACK (gorÄ…)';
-                }} else if (prevAbsTWA >= 90 && currAbsTWA >= 90) {{
-                    tackType = 'jibe';
-                    tackColor = '#1abc9c';
-                    tackLabel = 'JIBE (dolem)';
-                }}
-
-                if (tackType) {{
-                    const tackPoint = currSeg.from;
-                    const marker = L.circleMarker([tackPoint.lat, tackPoint.lon], {{
-                        radius: 10,
-                        fillColor: tackColor,
+                // Add maneuver marker if present
+                if (segment.maneuver_type) {{
+                    const markerColor = segment.maneuver_type === 'TACK' ? '#9b59b6' : '#1abc9c';
+                    const marker = L.circleMarker(to, {{
+                        radius: 8,
+                        fillColor: markerColor,
                         color: '#fff',
                         weight: 3,
                         opacity: 1,
                         fillOpacity: 0.95
                     }}).addTo(map);
 
-                    let popupHTML = `<div style="text-align: center; font-weight: bold; color: ${{tackColor}}; font-size: 14px;">${{tackLabel}}</div><hr style="margin: 5px 0; border: 1px solid ${{tackColor}};">
-                    <div style="font-size: 12px; line-height: 1.5;">
-                    <strong>Previous TWA:</strong> ${{prevTWA.toFixed(1)}}°<br>
-                    <strong>Current TWA:</strong> ${{currTWA.toFixed(1)}}°<br>
-                    <strong>Wind:</strong> ${{currSeg.wind_direction.toFixed(0)}}°<br>
-                    <strong>Wind Speed:</strong> ${{currSeg.wind_speed_knots.toFixed(1)}} kt`;
+                    marker.bindPopup(`
+                        <strong style="color: ${{markerColor}};">${{segment.maneuver_type}}</strong><br>
+                        After segment #${{idx + 1}}<br>
+                        Course change: ${{segment.bearing.toFixed(0)}}°
+                    `);
 
-                    if (tackType === 'tack') {{
-                        popupHTML += `<hr style="margin: 5px 0;"><strong style="color: #9b59b6;">Tack - Zwrot przez sztag</strong><br><small>Przebija gora dead zone (0)</small>`;
-                    }} else {{
-                        popupHTML += `<hr style="margin: 5px 0;"><strong style="color: #1abc9c;">Jibe - Zwrot przez rufe</strong><br><small>Przebija dolem dead zone (180)</small>`;
-                    }}
-
-                    popupHTML += '</div>';
-                    marker.bindPopup(popupHTML);
-                    tackMarkers.push(marker);
+                    maneuverMarkers.push(marker);
                 }}
+            }});
+
+            // Add start and end markers
+            if (SEGMENTS_DATA.length > 0) {{
+                const start = [SEGMENTS_DATA[0].from.lat, SEGMENTS_DATA[0].from.lon];
+                const end = [SEGMENTS_DATA[SEGMENTS_DATA.length - 1].to.lat, SEGMENTS_DATA[SEGMENTS_DATA.length - 1].to.lon];
+
+                L.circleMarker(start, {{
+                    radius: 10,
+                    fillColor: '#4caf50',
+                    color: '#000',
+                    weight: 2,
+                    opacity: 1,
+                    fillOpacity: 0.9
+                }}).addTo(map).bindPopup('<strong>START</strong>');
+
+                L.circleMarker(end, {{
+                    radius: 10,
+                    fillColor: '#f44336',
+                    color: '#000',
+                    weight: 2,
+                    opacity: 1,
+                    fillOpacity: 0.9
+                }}).addTo(map).bindPopup('<strong>FINISH</strong>');
             }}
+
+            map.fitBounds(bounds, {{ padding: [50, 50] }});
+            displayStats();
+            displaySegments();
+            document.getElementById('loading').style.display = 'none';
         }}
 
-        function displayStats(routeData) {{
-            const route = routeData.route;
-            const yacht = routeData.yacht;
+        function displayStats() {{
+            const totalDistance = SEGMENTS_DATA.reduce((sum, s) => sum + s.distance_nm, 0);
+            const totalTime = SEGMENTS_DATA.reduce((sum, s) => sum + s.estimated_time_hours, 0);
+            const avgSpeed = totalDistance / totalTime;
+
+            const tackCount = SEGMENTS_DATA.filter(s => s.maneuver_type === 'TACK').length;
+            const jibeCount = SEGMENTS_DATA.filter(s => s.maneuver_type === 'JIBE').length;
+
             const html = `
                 <div class="stat">
-                    <span class="stat-label">Jacht:</span>
-                    <span class="stat-value">${{yacht.name}}</span>
+                    <span class="stat-label">Total Distance:</span>
+                    <span class="stat-value">${{totalDistance.toFixed(2)}} nm</span>
                 </div>
                 <div class="stat">
-                    <span class="stat-label">Dystans:</span>
-                    <span class="stat-value">${{route.total_distance_nm.toFixed(2)}} nm</span>
+                    <span class="stat-label">Total Time:</span>
+                    <span class="stat-value">${{totalTime.toFixed(2)}} h</span>
                 </div>
                 <div class="stat">
-                    <span class="stat-label">Czas:</span>
-                    <span class="stat-value">${{route.total_time_hours.toFixed(2)}} h</span>
+                    <span class="stat-label">Avg Speed:</span>
+                    <span class="stat-value">${{avgSpeed.toFixed(2)}} kt</span>
                 </div>
                 <div class="stat">
-                    <span class="stat-label">Sr. predkosc:</span>
-                    <span class="stat-value">${{route.average_speed_knots.toFixed(2)}} kt</span>
+                    <span class="stat-label">Segments:</span>
+                    <span class="stat-value">${{SEGMENTS_DATA.length}}</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Tacks:</span>
+                    <span class="stat-value">${{tackCount}}</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Jibes:</span>
+                    <span class="stat-value">${{jibeCount}}</span>
                 </div>
             `;
             document.getElementById('routeStats').innerHTML = html;
         }}
 
-        function displaySegments(routeData) {{
-            const segments = routeData.route.segments;
-            const html = segments.map((seg, idx) => {{
-                const hals = classifyHals(seg.twa);
-                const color = posColors[getPosEnglish(hals)];
-                const halsPl = getHalsPolish(hals);
+        function displaySegments() {{
+            const html = SEGMENTS_DATA.map((seg, idx) => {{
+                const maneuverBadge = seg.maneuver_type ? 
+                    `<span class="maneuver-badge maneuver-${{seg.maneuver_type.toLowerCase()}}">${{seg.maneuver_type}}</span>` : '';
+
+                const color = tackColors[seg.tack_type] || '#666';
+
                 return `
                     <div class="segment-item" onclick="selectSegment(${{idx}})" style="border-left-color: ${{color}};">
+                        ${{maneuverBadge}}
                         <div style="margin-bottom: 6px;">
-                            <span class="segment-pos" style="background: ${{color}};">${{halsPl}}</span>
-                            <strong style="font-size: 11px;">#${{idx + 1}}</strong>
+                            <strong style="font-size: 11px;">Segment #${{idx + 1}}</strong>
                         </div>
                         <div style="font-size: 11px; color: #b0b0b0; line-height: 1.4;">
-                            ${{seg.distance_nm.toFixed(2)}} nm | ${{(seg.time_seconds / 3600).toFixed(2)}} h<br>
-                            B:${{seg.bearing.toFixed(0)}}° TWA:${{seg.twa.toFixed(0)}}°<br>
-                            Wind:${{seg.wind_speed_knots.toFixed(1)}}kt@${{seg.wind_direction.toFixed(0)}}°<br>
-                            Waves:${{seg.wave_height_m.toFixed(1)}}m | ${{seg.boat_speed_knots.toFixed(1)}}kt
+                            Distance: ${{seg.distance_nm.toFixed(2)}} nm<br>
+                            Time: ${{seg.estimated_time_hours.toFixed(2)}} h<br>
+                            Course: ${{seg.bearing.toFixed(0)}}°<br>
+                            Speed: ${{seg.boat_speed_knots.toFixed(1)}} kt<br>
+                            Tack: ${{seg.tack_type}}<br>
+                            Sail: ${{seg.sail_type || 'N/A'}}
                         </div>
                     </div>
                 `;
@@ -517,7 +444,7 @@ async def view_calculated_route(
 
         window.addEventListener('load', () => {{
             initMap();
-            loadRoute();
+            displayRoute();
         }});
     </script>
 </body>

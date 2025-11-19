@@ -5,6 +5,8 @@ from app.models.models import WeatherForecast
 from app.models.models import MeshedArea
 from app.models.models import Yacht
 from app.services.common import BaseService
+from app.models.models import RouteSegments
+from app.services.common import BaseService
 
 class RouteService(BaseService[Route]):
     def __init__(self, session: AsyncSession): super().__init__(session, Route)
@@ -20,3 +22,6 @@ class MeshedAreaService(BaseService[MeshedArea]):
 
 class YachtService(BaseService[Yacht]):
     def __init__(self, session: AsyncSession): super().__init__(session, Yacht)
+
+class RouteSegmentsService(BaseService[RouteSegments]):
+    def __init__(self, session: AsyncSession): super().__init__(session, RouteSegments)

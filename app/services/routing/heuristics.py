@@ -655,3 +655,14 @@ class SailingRouter:
                             p2: Tuple[float, float]) -> float:
         """Calculate Euclidean distance."""
         return math.sqrt((p2[0] - p1[0]) ** 2 + (p2[1] - p1[1]) ** 2)
+
+
+class SafeHeuristics(SailingHeuristics):
+    def __init__(self, yacht, weather_mapping, weather_data, non_navigable):
+        super().__init__(yacht, weather_mapping, weather_data)
+        self.non_navigable = set(non_navigable)
+
+    def calculate_edge_cost(self, from_vertex, to_vertex, from_idx, to_idx, previous_heading=None):
+        if from_idx in self.non_navigable or to_idx in self.non_navigable:
+            return float('inf')
+        return super().calculate_edge_cost(from_vertex, to_vertex, from_idx, to_idx, previous_heading)

@@ -5,8 +5,12 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 from datetime import datetime
+from pyproj import Transformer
 
 from pydantic import UUID4
+from sqlalchemy import delete
+from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from scipy.spatial import KDTree
 
@@ -15,166 +19,69 @@ from fastapi import Depends
 from fastapi import HTTPException
 
 from app.core.database import get_db as get_async_session
-from app.services.db.services import MeshedAreaService
+
+from app.models.models import RouteSegments
+from app.models.models import RoutePoint
+from app.models.models import RoutePointType
+from app.models.models import WeatherForecast
+from app.models.models import MeshedArea
+
+from app.services.db.services import RouteService
 from app.services.db.services import YachtService
+from app.services.db.services import MeshedAreaService
 from app.services.db.services import RoutePointService
+from app.services.routing.heuristics import SafeHeuristics
 from app.services.routing.heuristics import SailingHeuristics
 from app.services.routing.heuristics import SailingRouter
-from sqlalchemy import update
-from app.models.models import MeshedArea
-from datetime import datetime
+from app.services.routing.segement_optimalizer import SegmentOptimizer
+from app.services.weather.validator import WeatherDataValidator
+
+
 router = APIRouter()
 
 
-@dataclass
-class VerifiedWeatherPoint:
-    """Verified weather point with all required data"""
-    index: int
-    position: Tuple[float, float]
-    wind_speed: float
-    wind_direction: float
-    wave_height: float
-    wave_direction: float
-    wave_period: float
-    current_velocity: float
-    current_direction: float
-    depth: Optional[float] = None
-    has_valid_data: bool = True
-
-
-@dataclass
-class NavigationVertex:
-    """Navigation vertex with verified data"""
-    index: int
-    position: Tuple[float, float]
-    weather_point_idx: int
-    depth: Optional[float] = None
-    is_navigable: bool = True
-
-
-class WeatherDataValidator:
-    """Validates and filters weather data"""
-
-    @staticmethod
-    def validate_weather_data(data: Dict) -> bool:
-        """Check if weather data is complete and valid"""
-        required_fields = [
-            'wind_speed_10m', 'wind_direction_10m',
-            'wave_height', 'wave_direction', 'wave_period',
-            'current_speed', 'current_direction'
-        ]
-
-        # Check all required fields exist
-        for field in required_fields:
-            if field not in data:
-                return False
-
-            value = data[field]
-            if value is None:
-                return False
-
-            # Check for invalid values
-            if isinstance(value, (int, float)):
-                if not np.isfinite(value):
-                    return False
-
-                # Check realistic ranges
-                if field == 'wind_speed_10m' and (value < 0 or value > 100):  # knots
-                    return False
-                if field == 'wave_height' and (value < 0 or value > 30):  # meters
-                    return False
-                if field == 'wave_period' and (value < 0 or value > 30):  # seconds
-                    return False
-                if 'direction' in field and (value < 0 or value >= 360):
-                    return False
-            else:
-                return False
-
-        return True
-
-    @staticmethod
-    def validate_depth(depth: Optional[float], min_depth: float = 3.0) -> bool:
-        """Check if depth is sufficient for navigation"""
-        if depth is None:
-            return False  # No depth data = not navigable
-        if not np.isfinite(depth):
-            return False
-        return depth >= min_depth
-
-
-@router.post("/{meshed_area_id}/calculate-route",
-             status_code=200,
-             description="Calculate optimal sailing route using A* with strict data validation")
-async def calculate_optimal_route(
-        meshed_area_id: UUID4,
-        min_depth: float = 3.0,  # Minimum navigable depth in meters
-        session: AsyncSession = Depends(get_async_session)
-):
-    """
-    Calculates optimal sailing route with strict data validation.
-    Every navigation point must have valid weather and depth data.
-    """
+@router.post("/{meshed_area_id}/calculate-route", status_code=200)
+async def calculate_optimal_route(meshed_area_id: UUID4, min_depth: float = 3.0, session: AsyncSession = Depends(get_async_session)):
     try:
-        print("\n" + "=" * 60)
-        print("ROUTE CALCULATION WITH STRICT VALIDATION")
-        print("=" * 60)
-
-        # Load mesh
         mesh_svc = MeshedAreaService(session)
         meshed = await mesh_svc.get_entity_by_id(meshed_area_id, allow_none=False)
 
         if not meshed:
             raise HTTPException(404, f"Mesh {meshed_area_id} not found")
 
-        # Load mesh data
         navigation_mesh = {
             'vertices': json.loads(meshed.nodes_json),
             'triangles': json.loads(meshed.triangles_json)
         }
 
         vertices = np.array(navigation_mesh['vertices'])
-        print(f"Loaded {len(vertices)} navigation vertices")
-
-        # Load weather points metadata
         weather_points_data = json.loads(meshed.weather_points_json) if meshed.weather_points_json else None
+
         if not weather_points_data:
             raise HTTPException(400, "No weather points defined. Run mesh creation first.")
 
         weather_points = weather_points_data.get('points', [])
+
         if len(weather_points) == 0:
             raise HTTPException(400, "No weather points in mesh metadata")
 
-        print(f"Found {len(weather_points)} weather point definitions")
-
-        # Load weather data from database
-        from app.models.models import RoutePointType, WeatherForecast, RoutePoint
-        from sqlalchemy import select, update
-
         rpoint_svc = RoutePointService(session)
 
-        # Get all weather points with data
         weather_points_db = await rpoint_svc.get_all_entities(
-            filters={
-                'meshed_area_id': meshed_area_id,
-                'point_type': RoutePointType.WEATHER
-            },
+            filters={'meshed_area_id': meshed_area_id,'point_type': RoutePointType.WEATHER},
             page=1,
             limit=1000
         )
 
-        print(f"Found {len(weather_points_db)} weather points in database")
-
-        # Build validated weather data
         validator = WeatherDataValidator()
         verified_weather_data = {}
         invalid_weather_points = []
 
         for wp in weather_points_db:
-            # Get latest weather forecast
             query = (
                 select(WeatherForecast)
                 .where(WeatherForecast.route_point_id == wp.id)
-                .where(WeatherForecast.is_default == False)  # Exclude default data
+                .where(WeatherForecast.is_default == False)
                 .order_by(WeatherForecast.forecast_timestamp.desc())
                 .limit(1)
             )
@@ -182,11 +89,9 @@ async def calculate_optimal_route(
             forecast = result.scalar_one_or_none()
 
             if not forecast:
-                print(f"❌ Weather point {wp.seq_idx}: No valid forecast data")
                 invalid_weather_points.append(wp.seq_idx - 1000)
                 continue
 
-            # Convert to weather data format
             idx = wp.seq_idx - 1000
 
             weather_dict = {
@@ -199,24 +104,15 @@ async def calculate_optimal_route(
                 'current_direction': forecast.current_direction,
             }
 
-            # Validate weather data
             if not validator.validate_weather_data(weather_dict):
-                print(f"❌ Weather point {idx}: Invalid or incomplete weather data")
                 invalid_weather_points.append(idx)
                 continue
 
             verified_weather_data[idx] = weather_dict
-            print(f"✓ Weather point {idx}: Valid data (wind={weather_dict['wind_speed_10m']:.1f}kt)")
 
         if len(verified_weather_data) == 0:
             raise HTTPException(400, "No weather points have valid data. Run fetch-weather first.")
 
-        print(f"\n✅ Verified weather data: {len(verified_weather_data)}/{len(weather_points)} points valid")
-
-        if len(invalid_weather_points) > 0:
-            print(f"⚠️ Invalid weather points will be avoided: {invalid_weather_points}")
-
-        # Create weather mapping with validation
         weather_positions = []
         weather_indices_map = {}  # Maps weather array index to weather data index
 
@@ -229,59 +125,42 @@ async def calculate_optimal_route(
         if len(weather_positions) == 0:
             raise HTTPException(400, "No valid weather points after validation")
 
-        print(f"Building KDTree with {len(weather_positions)} valid weather points")
-
-        # Build KDTree for valid weather points only
         weather_tree = KDTree(weather_positions)
 
-        # Map navigation vertices to weather points
-        weather_mapping = {i: [] for i in range(len(weather_points))}  # Use original indices
+        weather_mapping = {i: [] for i in range(len(weather_points))}
         nav_to_weather = {}
         navigable_vertices = []
         non_navigable_vertices = []
 
-        MAX_WEATHER_DISTANCE = 100000.0  # Maximum 1km to weather point
+        MAX_WEATHER_DISTANCE = 10000.0 # distance to furthest weatherpoint
 
         for nav_idx, nav_vertex in enumerate(vertices):
-            # Find nearest valid weather point
             distance, nearest_idx = weather_tree.query(nav_vertex, k=1)
 
             if distance > MAX_WEATHER_DISTANCE:
-                print(f"⚠️ Nav vertex {nav_idx}: Too far from weather data ({distance:.0f}m)")
+                print(f"Nav vertex {nav_idx}: Too far from weather data ({distance:.0f}m)")
                 non_navigable_vertices.append(nav_idx)
                 continue
 
-            # Map back to original weather data index
             weather_data_idx = weather_indices_map[nearest_idx]
 
-            # Verify this weather point has valid data
             if weather_data_idx not in verified_weather_data:
-                print(f"⚠️ Nav vertex {nav_idx}: Nearest weather point has no valid data")
                 non_navigable_vertices.append(nav_idx)
                 continue
 
-            # Valid mapping
             weather_mapping[weather_data_idx].append(nav_idx)
             nav_to_weather[nav_idx] = weather_data_idx
             navigable_vertices.append(nav_idx)
 
-        print(f"\n📊 NAVIGATION VERTEX VALIDATION:")
-        print(f"  ✅ Navigable: {len(navigable_vertices)}/{len(vertices)} vertices")
-        print(f"  ❌ Non-navigable: {len(non_navigable_vertices)} vertices")
-
         if len(navigable_vertices) < len(vertices) * 0.5:
-            raise HTTPException(400,
-                                f"Only {len(navigable_vertices)}/{len(vertices)} vertices are navigable. Check weather data coverage.")
+            raise HTTPException(400,f"Only {len(navigable_vertices)}/{len(vertices)} vertices are navigable.")
 
-        # Load yacht
-        from app.services.db.services import RouteService, YachtService
         route_svc = RouteService(session)
         yacht_svc = YachtService(session)
 
         route = await route_svc.get_entity_by_id(meshed.route_id, allow_none=False)
         yacht = await yacht_svc.get_entity_by_id(route.yacht_id, allow_none=False)
 
-        # Find start and stop points
         query_start = (
             select(RoutePoint)
             .where(RoutePoint.route_id == meshed.route_id)
@@ -306,40 +185,24 @@ async def calculate_optimal_route(
         if not start_point or not stop_point:
             raise HTTPException(400, "Start or stop point not found")
 
-        # Transform coordinates
-        from pyproj import Transformer
+
         transformer = Transformer.from_crs(4326, meshed.crs_epsg, always_xy=True)
 
         start_xy = transformer.transform(start_point.x, start_point.y)
         stop_xy = transformer.transform(stop_point.x, stop_point.y)
 
-        print(f"\n🚢 ROUTE PLANNING:")
-        print(f"  Start: {start_xy}")
-        print(f"  Stop: {stop_xy}")
-
-        # Verify start and stop points are navigable
         start_vertex_idx = np.argmin(np.sum((vertices - start_xy) ** 2, axis=1))
-        stop_vertex_idx = np.argmin(np.sum((vertices - stop_xy) ** 2, axis=1))
-
         if start_vertex_idx not in navigable_vertices:
             raise HTTPException(400, "Start point is not in navigable area (no weather data)")
 
+        stop_vertex_idx = np.argmin(np.sum((vertices - stop_xy) ** 2, axis=1))
         if stop_vertex_idx not in navigable_vertices:
             raise HTTPException(400, "Stop point is not in navigable area (no weather data)")
 
-        # Create filtered navigation mesh with only navigable vertices
-        # This is more complex - for now use full mesh but mark non-navigable
-
-        # Create router with validated data only
         router_instance = SailingRouter(navigation_mesh, verified_weather_data, yacht)
 
-        # Initialize heuristics
         heuristics = SailingHeuristics(yacht, weather_mapping, verified_weather_data)
 
-        # Calculate and save heuristic scores
-        print(f"\n📊 Calculating heuristic scores for {len(navigable_vertices)} navigable vertices...")
-
-        # Get navigation points from database
         nav_points = await rpoint_svc.get_all_entities(
             filters={
                 'route_id': meshed.route_id,
@@ -349,34 +212,25 @@ async def calculate_optimal_route(
             limit=10000
         )
 
-        print(f"Found {len(nav_points)} navigation points in database")
+        POSITION_TOLERANCE = 10.0
 
-        # Create mapping with tolerance for floating point errors
-        POSITION_TOLERANCE = 10.0  # 10 meters tolerance
-
-        # Transform all database points to local coordinates
         db_points_local = []
         for np_obj in nav_points:
             np_xy = transformer.transform(np_obj.x, np_obj.y)
             db_points_local.append((np_xy, np_obj))
 
-        # Build KDTree for database points
         if len(db_points_local) > 0:
             db_positions = np.array([p[0] for p in db_points_local])
             db_tree = KDTree(db_positions)
 
-            # Match mesh vertices to database points
             matched = 0
             updates = []
 
             for vertex_idx in navigable_vertices:
                 vertex = vertices[vertex_idx]
-
-                # Find nearest database point
                 dist, db_idx = db_tree.query(vertex, k=1)
 
                 if dist < POSITION_TOLERANCE:
-                    # Calculate heuristic score
                     h_score = heuristics.calculate_heuristic_cost(
                         tuple(vertex),
                         stop_xy,
@@ -392,7 +246,6 @@ async def calculate_optimal_route(
                         })
                         matched += 1
 
-            # Batch update heuristic scores
             if updates:
                 for update_data in updates:
                     update_stmt = (
@@ -406,12 +259,7 @@ async def calculate_optimal_route(
                     await session.execute(update_stmt)
 
                 await session.commit()
-                print(f"✅ Updated heuristic scores for {matched} navigation points")
-            else:
-                print(f"⚠️ No navigation points matched to mesh vertices")
 
-        # Find optimal path
-        print("\n🔍 Finding optimal route with validated data...")
 
         optimal_path = router_instance.find_optimal_route(
             start=start_xy,
@@ -420,20 +268,6 @@ async def calculate_optimal_route(
         )
 
         if not optimal_path:
-            print("❌ No path found with strict validation")
-
-            # Try with modified heuristics that avoid non-navigable vertices
-            class SafeHeuristics(SailingHeuristics):
-                def __init__(self, yacht, weather_mapping, weather_data, non_navigable):
-                    super().__init__(yacht, weather_mapping, weather_data)
-                    self.non_navigable = set(non_navigable)
-
-                def calculate_edge_cost(self, from_vertex, to_vertex, from_idx, to_idx, previous_heading=None):
-                    # Infinite cost for non-navigable vertices
-                    if from_idx in self.non_navigable or to_idx in self.non_navigable:
-                        return float('inf')
-                    return super().calculate_edge_cost(from_vertex, to_vertex, from_idx, to_idx, previous_heading)
-
             safe_router = SailingRouter(
                 navigation_mesh,
                 verified_weather_data,
@@ -452,13 +286,11 @@ async def calculate_optimal_route(
             if not optimal_path:
                 raise HTTPException(400, "No navigable route found. Check weather coverage and water depth.")
 
-        # Convert path to WGS84
         transformer_back = Transformer.from_crs(meshed.crs_epsg, 4326, always_xy=True)
         path_wgs84 = [
             transformer_back.transform(p[0], p[1]) for p in optimal_path
         ]
 
-        # Calculate segments with validation
         segments = []
         total_time = 0.0
         total_distance = 0.0
@@ -468,16 +300,13 @@ async def calculate_optimal_route(
             from_pt = optimal_path[i]
             to_pt = optimal_path[i + 1]
 
-            # Find vertex indices
             from_idx = np.argmin(np.sum((vertices - from_pt) ** 2, axis=1))
             to_idx = np.argmin(np.sum((vertices - to_pt) ** 2, axis=1))
 
-            # Skip if non-navigable
             if from_idx not in navigable_vertices or to_idx not in navigable_vertices:
                 invalid_segments += 1
                 continue
 
-            # Calculate segment
             try:
                 segment_cost = heuristics.calculate_edge_cost(
                     from_pt, to_pt, from_idx, to_idx,
@@ -515,17 +344,10 @@ async def calculate_optimal_route(
                 total_distance += distance
 
             except Exception as e:
-                print(f"Error processing segment {i}: {e}")
                 invalid_segments += 1
 
         if len(segments) == 0:
             raise HTTPException(400, "No valid segments in route")
-
-        print(f"\n✅ ROUTE CALCULATION COMPLETE:")
-        print(f"  Valid segments: {len(segments)}")
-        print(f"  Invalid segments: {invalid_segments}")
-        print(f"  Total distance: {total_distance / 1852:.1f} nm")
-        print(f"  Total time: {total_time / 3600:.1f} hours")
 
         route_data = {
             "meshed_area_id": str(meshed_area_id),
@@ -557,6 +379,52 @@ async def calculate_optimal_route(
         )
 
         await session.execute(stmt)
+        await session.commit()
+
+
+        optimizer = SegmentOptimizer(bearing_tolerance=5.0)
+        optimized_segments = optimizer.optimize_segments(segments)
+
+        await session.execute(delete(RouteSegments).where(RouteSegments.route_id == meshed.route_id))
+        await session.commit()
+
+        for idx, opt_seg in enumerate(optimized_segments):
+            from_point = await _get_or_create_route_point(
+                session, meshed.route_id,
+                opt_seg.from_point_wgs84[0], opt_seg.from_point_wgs84[1],
+                idx * 2, RoutePointType.NAVIGATION
+            )
+
+            to_point = await _get_or_create_route_point(
+                session, meshed.route_id,
+                opt_seg.to_point_wgs84[0], opt_seg.to_point_wgs84[1],
+                idx * 2 + 1, RoutePointType.NAVIGATION
+            )
+
+            maneuver_type = None
+            if opt_seg.has_tack:
+                maneuver_type = "TACK"
+            elif opt_seg.has_jibe:
+                maneuver_type = "JIBE"
+
+            new_segment = RouteSegments(
+                route_id=meshed.route_id,
+                from_point=from_point.id,
+                to_point=to_point.id,
+                segment_order=idx,
+                recommended_course=opt_seg.avg_bearing,
+                estimated_time=opt_seg.total_time_hours * 60,  # Convert to minutes
+                sail_type=_determine_sail_type(opt_seg.avg_twa, opt_seg.avg_wind_speed_knots),
+                tack_type=opt_seg.predominant_point_of_sail,
+                maneuver_type=maneuver_type,
+                distance_nm=opt_seg.total_distance_nm,
+                bearing=opt_seg.avg_bearing,
+                wind_angle=opt_seg.avg_twa,
+                current_effect=0.0
+            )
+
+            session.add(new_segment)
+
         await session.commit()
 
         return {
@@ -595,64 +463,6 @@ async def calculate_optimal_route(
         traceback.print_exc()
         raise HTTPException(500, f"Failed to calculate route: {str(e)}")
 
-
-
-async def save_calculated_route_to_db(
-        session: AsyncSession,
-        meshed_area_id: UUID4,
-        route_data: dict
-) -> None:
-    """
-    Zapisuje obliczonÄ… trasÄ™ do bazy danych w polu calculated_route_json
-    w tabeli MeshedArea.
-
-    ZakÅ‚adam, Å¼e masz kolumnÄ™ calculated_route_json w modelu MeshedArea.
-    JeÅ›li nie masz, dodaj jÄ… do modelu:
-
-    calculated_route_json = Column(Text, nullable=True)
-    calculated_route_timestamp = Column(DateTime, nullable=True)
-    """
-    mesh_svc = MeshedAreaService(session)
-
-    # Dodaj timestamp do danych
-    route_data['calculated_at'] = datetime.utcnow().isoformat()
-
-    # Zapisz jako JSON
-    from sqlalchemy import update
-    from app.models.models import MeshedArea
-
-    stmt = (
-        update(MeshedArea)
-        .where(MeshedArea.id == meshed_area_id)
-        .values(
-            calculated_route_json=json.dumps(route_data),
-            calculated_route_timestamp=datetime.utcnow()
-        )
-    )
-
-    await session.execute(stmt)
-    await session.commit()
-
-def _get_point_of_sail(twa: float) -> str:
-    """Determine point of sail from True Wind Angle"""
-    twa = abs(twa)
-
-    if twa < 25:
-        return "no-go zone"
-    elif twa < 45:
-        return "close-hauled"
-    elif twa < 60:
-        return "close reach"
-    elif twa < 90:
-        return "beam reach"
-    elif twa < 120:
-        return "broad reach"
-    elif twa < 150:
-        return "running"
-    else:
-        return "dead run"
-
-
 @router.get("/{meshed_area_id}/calculated-route", status_code=200)
 async def get_calculated_route(
         meshed_area_id: UUID4,
@@ -672,3 +482,100 @@ async def get_calculated_route(
         "calculated_at": route_data.get('calculated_at'),
         "data": route_data
     }
+
+async def save_calculated_route_to_db(session: AsyncSession, meshed_area_id: UUID4, route_data: dict) -> None:
+    mesh_svc = MeshedAreaService(session)
+
+    route_data['calculated_at'] = datetime.utcnow().isoformat()
+    stmt = (
+        update(MeshedArea)
+        .where(MeshedArea.id == meshed_area_id)
+        .values(
+            calculated_route_json=json.dumps(route_data),
+            calculated_route_timestamp=datetime.utcnow()
+        )
+    )
+
+    await session.execute(stmt)
+    await session.commit()
+
+
+def _get_point_of_sail(twa: float) -> str:
+    twa = abs(twa)
+
+    if twa < 25:
+        return "no-go zone"
+    elif twa < 45:
+        return "close-hauled"
+    elif twa < 60:
+        return "close reach"
+    elif twa < 90:
+        return "beam reach"
+    elif twa < 120:
+        return "broad reach"
+    elif twa < 150:
+        return "running"
+    else:
+        return "dead run"
+
+async def _get_or_create_route_point(
+        session: AsyncSession,
+        route_id: UUID4,
+        lon: float,
+        lat: float,
+        seq_idx: int,
+        point_type: RoutePointType
+) -> RoutePoint:
+    TOLERANCE = 0.00001  # ~1 meter
+
+    query = (
+        select(RoutePoint)
+        .where(RoutePoint.route_id == route_id)
+        .where(RoutePoint.x.between(lon - TOLERANCE, lon + TOLERANCE))
+        .where(RoutePoint.y.between(lat - TOLERANCE, lat + TOLERANCE))
+        .where(RoutePoint.point_type == point_type)
+    )
+
+    result = await session.execute(query)
+    existing = result.scalar_one_or_none()
+
+    if existing:
+        return existing
+
+    new_point = RoutePoint(
+        route_id=route_id,
+        point_type=point_type,
+        seq_idx=seq_idx,
+        x=lon,
+        y=lat,
+        timestamp=datetime.utcnow()
+    )
+
+    session.add(new_point)
+    await session.flush()
+
+    return new_point
+
+
+def _determine_sail_type(twa: float, wind_speed_knots: float) -> str:
+    abs_twa = abs(twa)
+
+    if wind_speed_knots < 8:
+        if abs_twa > 90:
+            return "spinnaker"
+        else:
+            return "genoa"
+    elif wind_speed_knots < 15:
+        if abs_twa > 120:
+            return "spinnaker"
+        elif abs_twa > 60:
+            return "genoa"
+        else:
+            return "jib"
+    else:
+        if abs_twa > 140:
+            return "spinnaker"
+        elif abs_twa > 90:
+            return "jib"
+        else:
+            return "storm_jib"
