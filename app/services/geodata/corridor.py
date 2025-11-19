@@ -1,12 +1,11 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Tuple, List
+from typing import Tuple
 
 import geopandas as gpd
-from shapely.geometry import LineString, Polygon, MultiPolygon
-from shapely.ops import unary_union
-from pyproj import CRS, Transformer
+from shapely.geometry import LineString
+from shapely.geometry import Polygon
+from pyproj import CRS
 
 NM_TO_M : float = 1852.00
 

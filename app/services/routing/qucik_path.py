@@ -1,187 +1,191 @@
 from __future__ import annotations
+
 import math
 import heapq
 import numpy as np
+from typing import List
+from typing import Tuple
+from typing import Dict
+from typing import Optional
+from typing import TypeAlias
 
-from typing import Dict, List, Tuple, Optional
 from shapely.geometry import LineString, Point
 from shapely.ops import nearest_points
 from app.services.meshing.triangle_mesher import _triangulate_geom
 
+Point2D: TypeAlias = Tuple[float, float]
+AdjacencyGraph: TypeAlias = Dict[int, List[Tuple[int, float]]]
 
-def _edge_ok(p: Tuple[float, float], q: Tuple[float, float], navigable) -> bool:
-    """Sprawdza czy krawędź mieści się w obszarze żeglownym"""
-    seg = LineString([p, q])
+
+def _is_edge_valid(p1: Point2D, p2: Point2D, navigable_area) -> bool:
+    segment = LineString([p1, p2])
     try:
-        return seg.within(navigable)
+        return segment.within(navigable_area)
     except Exception:
-        return seg.buffer(0).within(navigable.buffer(0))
+        return segment.buffer(0).within(navigable_area.buffer(0))
 
 
-def _knn_indices(V: np.ndarray, pt: Tuple[float, float], k: int = 8) -> List[int]:
-    dx = V[:, 0] - pt[0]
-    dy = V[:, 1] - pt[1]
-    d2 = dx * dx + dy * dy
-    # Zabezpieczenie, gdy k jest większe niż liczba wierzchołków
-    k = min(k, len(V))
-    if k == 0: return []
+def _get_knn_indices(vertices: np.ndarray, point: Point2D, k: int = 8) -> List[int]:
+    dx = vertices[:, 0] - point[0]
+    dy = vertices[:, 1] - point[1]
+    dist_sq = dx * dx + dy * dy
 
-    idx = np.argpartition(d2, k - 1)[:k]
-    return idx[np.argsort(d2[idx])].tolist()
+    k = min(k, len(vertices))
+    if k == 0:
+        return []
+
+    indices = np.argpartition(dist_sq, k - 1)[:k]
+    return indices[np.argsort(dist_sq[indices])].tolist()
 
 
-def _build_graph(V: np.ndarray, T: np.ndarray, navigable, fairway=None) -> Dict[int, List[Tuple[int, float]]]:
-    """
-    Buduje graf sąsiedztwa.
-    """
-    adj: Dict[int, List[Tuple[int, float]]] = {i: [] for i in range(V.shape[0])}
-    seen = set()
-    for a, b, c in T:
-        tri_e = [(a, b), (b, c), (c, a)]
-        for u, v in tri_e:
-            if u == v: continue
-            e = (min(u, v), max(u, v))
-            if e in seen: continue
-            seen.add(e)
-            pu = (float(V[u, 0]), float(V[u, 1]))
-            pv = (float(V[v, 0]), float(V[v, 1]))
+def _build_adjacency_graph(vertices: np.ndarray, triangles: np.ndarray,
+        navigable_area, fairway: Optional[LineString] = None) -> AdjacencyGraph:
+    graph: AdjacencyGraph = {i: [] for i in range(vertices.shape[0])}
+    seen_edges = set()
 
-            if not _edge_ok(pu, pv, navigable):
+    for a, b, c in triangles:
+        triangle_edges = [(a, b), (b, c), (c, a)]
+        for u, v in triangle_edges:
+            if u == v:
                 continue
 
-            w = math.hypot(pu[0] - pv[0], pu[1] - pv[1])
+            edge_key = (min(u, v), max(u, v))
+            if edge_key in seen_edges:
+                continue
+            seen_edges.add(edge_key)
+
+            p_u = (float(vertices[u, 0]), float(vertices[u, 1]))
+            p_v = (float(vertices[v, 0]), float(vertices[v, 1]))
+
+            if not _is_edge_valid(p_u, p_v, navigable_area):
+                continue
+
+            weight = math.dist(p_u, p_v)
 
             if fairway is not None:
                 try:
-                    if LineString([pu, pv]).distance(fairway) < 80.0:
-                        w *= 0.75
+                    if LineString([p_u, p_v]).distance(fairway) < 80.0:
+                        weight *= 0.75
                 except Exception:
                     pass
-            adj[u].append((v, w))
-            adj[v].append((u, w))
-    return adj
+
+            graph[u].append((v, weight))
+            graph[v].append((u, weight))
+
+    return graph
 
 
-def _dijkstra(adj: Dict[int, List[Tuple[int, float]]], s: int, t: int) -> List[int]:
-    INF = 1e100
-    dist = {i: INF for i in adj.keys()}
-    prev = {i: -1 for i in adj.keys()}
-    dist[s] = 0.0
-    pq = [(0.0, s)]
+def _dijkstra_search(graph: AdjacencyGraph, start_node: int, target_node: int) -> List[int]:
+    inf_dist = 1e100
+    distances = {node: inf_dist for node in graph}
+    previous_nodes = {node: -1 for node in graph}
 
-    found_target = False
+    distances[start_node] = 0.0
+    priority_queue = [(0.0, start_node)]
 
-    while pq:
-        d, u = heapq.heappop(pq)
-        if d > dist[u]: continue
-        if u == t:
-            found_target = True
+    found = False
+
+    while priority_queue:
+        current_dist, current_node = heapq.heappop(priority_queue)
+
+        if current_dist > distances[current_node]:
+            continue
+
+        if current_node == target_node:
+            found = True
             break
-        for v, w in adj[u]:
-            nd = d + w
-            if nd < dist[v]:
-                dist[v] = nd
-                prev[v] = u
-                heapq.heappush(pq, (nd, v))
 
-    if not found_target or prev[t] == -1:
+        for neighbor, weight in graph[current_node]:
+            new_dist = current_dist + weight
+            if new_dist < distances[neighbor]:
+                distances[neighbor] = new_dist
+                previous_nodes[neighbor] = current_node
+                heapq.heappush(priority_queue, (new_dist, neighbor))
+
+    if not found or previous_nodes[target_node] == -1:
         return []
 
     path = []
-    cur = t
-    while cur != -1:
-        path.append(cur)
-        cur = prev[cur]
-    path.reverse()
-    return path
+    current = target_node
+    while current != -1:
+        path.append(current)
+        current = previous_nodes[current]
+
+    return path[::-1]
 
 
-# Zmieniono domyślną wartość coarse_area z 250000.0 na 5000.0
-def safe_polyline(navigable, waypoints: List[Tuple[float, float]],
-                  coarse_area: float = 5000.0, fairway=None) -> Optional[LineString]:
-    """
-    Generuje bezpieczną linię 'detour'.
-    Zmniejszone coarse_area pozwala znaleźć drogę w wąskich przejściach.
-    """
+def safe_polyline(navigable_area, waypoints: List[Point2D],
+        coarse_area: float = 5000.0, fairway: Optional[LineString] = None) -> Optional[LineString]:
     if not waypoints or len(waypoints) < 2:
         return None
 
-    # 1. Snapowanie punktów do wody
     valid_waypoints = []
     for wp in waypoints:
-        p = Point(wp)
-        if not p.within(navigable):
+        point = Point(wp)
+        if not point.within(navigable_area):
             try:
-                # Szukamy najbliższego punktu wewnątrz poligonu navigable
-                # Jeśli navigable ma dziury (mielizny), to nearest_points może zwrócić punkt na brzegu dziury - to OK.
-                p_in, p_near = nearest_points(navigable, p)
-                # nearest_points(poly, point) zwraca (punkt_na_poly, punkt_zrodlowy)
-                # Ale uwaga: w shapely ops.nearest_points argumenty są (geom1, geom2) -> (p1, p2)
-                # p1 to punkt na geom1 najbliższy do geom2.
-
-                valid_waypoints.append((p_in.x, p_in.y))
+                p_snapped, _ = nearest_points(navigable_area, point)
+                valid_waypoints.append((p_snapped.x, p_snapped.y))
             except Exception:
                 valid_waypoints.append(wp)
         else:
             valid_waypoints.append(wp)
 
-    # 2. Triangulacja - teraz gęstsza (5000.0)
-    mesh = _triangulate_geom(navigable, max_area=coarse_area)
-    V = np.asarray(mesh["vertices"])
-    T = np.asarray(mesh["triangles"], dtype=int)
+    mesh = _triangulate_geom(navigable_area, max_area=coarse_area)
+    vertices = np.asarray(mesh["vertices"])
+    triangles = np.asarray(mesh["triangles"], dtype=int)
 
-    if V.size == 0 or T.size == 0:
+    if vertices.size == 0 or triangles.size == 0:
         return None
 
-    adj_base = _build_graph(V, T, navigable, fairway=fairway)
+    adjacency_graph = _build_adjacency_graph(vertices, triangles, navigable_area, fairway)
 
     full_path_coords = []
-    s_idx_virt = V.shape[0]
-    t_idx_virt = V.shape[0] + 1
+    virtual_start_idx = vertices.shape[0]
+    virtual_target_idx = vertices.shape[0] + 1
+
+    adjacency_graph[virtual_start_idx] = []
+    adjacency_graph[virtual_target_idx] = []
 
     for i in range(len(valid_waypoints) - 1):
-        start_seg = valid_waypoints[i]
-        end_seg = valid_waypoints[i + 1]
+        start_point = valid_waypoints[i]
+        end_point = valid_waypoints[i + 1]
 
-        # Reset wirtualnych węzłów
-        adj_base[s_idx_virt] = []
-        adj_base[t_idx_virt] = []
+        adjacency_graph[virtual_start_idx].clear()
+        adjacency_graph[virtual_target_idx].clear()
 
-        # Podłączamy start i stop do sieci
-        # Zwiększamy k=20 dla pewności przy gęstszej siatce
-        for k_idx in _knn_indices(V, start_seg, k=20):
-            pu = (float(V[k_idx, 0]), float(V[k_idx, 1]))
-            if _edge_ok(pu, start_seg, navigable):
-                w = math.hypot(pu[0] - start_seg[0], pu[1] - start_seg[1])
-                adj_base[s_idx_virt].append((k_idx, w))
-                adj_base[k_idx].append((s_idx_virt, w))
+        for k_idx in _get_knn_indices(vertices, start_point, k=20):
+            vertex_point = (float(vertices[k_idx, 0]), float(vertices[k_idx, 1]))
+            if _is_edge_valid(vertex_point, start_point, navigable_area):
+                weight = math.dist(vertex_point, start_point)
+                adjacency_graph[virtual_start_idx].append((k_idx, weight))
+                adjacency_graph[k_idx].append((virtual_start_idx, weight))
 
-        for k_idx in _knn_indices(V, end_seg, k=20):
-            pu = (float(V[k_idx, 0]), float(V[k_idx, 1]))
-            if _edge_ok(pu, end_seg, navigable):
-                w = math.hypot(pu[0] - end_seg[0], pu[1] - end_seg[1])
-                adj_base[t_idx_virt].append((k_idx, w))
-                adj_base[k_idx].append((t_idx_virt, w))
+        for k_idx in _get_knn_indices(vertices, end_point, k=20):
+            vertex_point = (float(vertices[k_idx, 0]), float(vertices[k_idx, 1]))
+            if _is_edge_valid(vertex_point, end_point, navigable_area):
+                weight = math.dist(vertex_point, end_point)
+                adjacency_graph[virtual_target_idx].append((k_idx, weight))
+                adjacency_graph[k_idx].append((virtual_target_idx, weight))
 
-        path_indices = _dijkstra(adj_base, s_idx_virt, t_idx_virt)
+        path_indices = _dijkstra_search(adjacency_graph, virtual_start_idx, virtual_target_idx)
 
-        # Sprzątanie grafu po tej iteracji
-        for u, _ in adj_base[s_idx_virt]:
-            adj_base[u] = [x for x in adj_base[u] if x[0] != s_idx_virt]
-        for u, _ in adj_base[t_idx_virt]:
-            adj_base[u] = [x for x in adj_base[u] if x[0] != t_idx_virt]
+        for u, _ in adjacency_graph[virtual_start_idx]:
+            adjacency_graph[u] = [edge for edge in adjacency_graph[u] if edge[0] != virtual_start_idx]
+        for u, _ in adjacency_graph[virtual_target_idx]:
+            adjacency_graph[u] = [edge for edge in adjacency_graph[u] if edge[0] != virtual_target_idx]
 
         if not path_indices:
-            segment_coords = [start_seg, end_seg]
+            segment_coords = [start_point, end_point]
         else:
             segment_coords = []
             for idx in path_indices:
-                if idx == s_idx_virt:
-                    segment_coords.append(start_seg)
-                elif idx == t_idx_virt:
-                    segment_coords.append(end_seg)
+                if idx == virtual_start_idx:
+                    segment_coords.append(start_point)
+                elif idx == virtual_target_idx:
+                    segment_coords.append(end_point)
                 else:
-                    segment_coords.append((float(V[idx, 0]), float(V[idx, 1])))
+                    segment_coords.append((float(vertices[idx, 0]), float(vertices[idx, 1])))
 
         if i == 0:
             full_path_coords.extend(segment_coords)
@@ -191,10 +195,8 @@ def safe_polyline(navigable, waypoints: List[Tuple[float, float]],
     if len(full_path_coords) < 2:
         return None
 
-    ls = LineString(full_path_coords)
+    polyline = LineString(full_path_coords)
     try:
-        # Uproszczenie geometrii, żeby nie zwracać tysięcy punktów
-        ls = ls.simplify(5.0, preserve_topology=False)
+        return polyline.simplify(5.0, preserve_topology=False)
     except Exception:
-        pass
-    return ls
+        return polyline

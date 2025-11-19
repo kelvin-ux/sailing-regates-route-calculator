@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import numpy as np
-from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass
 from datetime import datetime
 from pyproj import Transformer
 

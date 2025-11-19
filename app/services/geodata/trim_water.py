@@ -1,11 +1,17 @@
 from __future__ import annotations
 from pathlib import Path
+
 import geopandas as gpd
-from shapely.geometry import Polygon, MultiPolygon
+
+from shapely.geometry import Polygon
+from shapely.geometry import MultiPolygon
 from shapely.ops import unary_union
+
 from pyproj import CRS
-from .corridor import corridor_bbox_wgs84, _to_proj
-from .osm_land import ensure_land_polygons, land_in_bbox
+
+from .corridor import corridor_bbox_wgs84
+from .osm_land import ensure_land_polygons
+from .osm_land import land_in_bbox
 
 def water_polygon_in_corridor(corridor_xy: Polygon, local_crs: CRS, data_dir: Path) -> Polygon:
     """

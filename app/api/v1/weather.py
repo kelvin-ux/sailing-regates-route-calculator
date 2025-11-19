@@ -28,7 +28,6 @@ _weather_service: Optional[OpenMeteoService] = None
 
 
 def get_weather_service() -> OpenMeteoService:
-    """Get or create weather service instance"""
     global _weather_service
     if _weather_service is None:
         _weather_service = OpenMeteoService(
@@ -39,27 +38,14 @@ def get_weather_service() -> OpenMeteoService:
     return _weather_service
 
 
-@router.post("/{meshed_area_id}/fetch-weather",
-             response_model=WeatherBatchResponse,
-             status_code=200,
-             description="Fetch marine weather data - only saves valid data, no defaults")
+@router.post("/{meshed_area_id}/fetch-weather", response_model=WeatherBatchResponse, status_code=200)
 async def fetch_weather_for_mesh(
         meshed_area_id: UUID4,
         save_to_db: bool = Query(True, description="Save weather data to database"),
-        allow_defaults: bool = Query(False, description="Allow saving default/fallback data"),
         session: AsyncSession = Depends(get_async_session),
         service: OpenMeteoService = Depends(get_weather_service)
 ):
-    """
-    Fetch weather data for all weather points.
-    Only saves data that was successfully retrieved from API.
-    Points with failed API calls are skipped unless allow_defaults=True.
-    """
     try:
-        print("\n" + "=" * 60)
-        print("WEATHER FETCHING WITH VALIDATION")
-        print("=" * 60)
-
         mesh_svc = MeshedAreaService(session)
         rpoint_svc = RoutePointService(session)
         wf_svc = WeatherForecastService(session)
@@ -69,7 +55,6 @@ async def fetch_weather_for_mesh(
         if not meshed:
             raise HTTPException(404, f"MeshedArea {meshed_area_id} not found")
 
-        # Get weather points configuration
         weather_points_data = {}
         if meshed.weather_points_json:
             weather_points_data = json.loads(meshed.weather_points_json)
@@ -82,9 +67,6 @@ async def fetch_weather_for_mesh(
         if not weather_points:
             raise HTTPException(400, "No weather points found for this mesh")
 
-        print(f"Found {len(weather_points)} weather points to fetch")
-
-        # Transform to WGS84 if needed
         epsg = int(meshed.crs_epsg or 4326)
         if epsg != 4326:
             transformer = Transformer.from_crs(epsg, 4326, always_xy=True)
@@ -94,7 +76,6 @@ async def fetch_weather_for_mesh(
         else:
             weather_points_wgs84 = weather_points
 
-        # Check for existing weather points in database
         existing_weather_points = await rpoint_svc.get_all_entities(
             filters={
                 'meshed_area_id': meshed_area_id,
@@ -105,10 +86,7 @@ async def fetch_weather_for_mesh(
         )
 
         weather_point_ids = []
-
-        # Create weather points if they don't exist
         if not existing_weather_points or len(existing_weather_points) == 0:
-            print("Creating weather points in database...")
             for idx, (lon, lat) in enumerate(weather_points_wgs84):
                 rp = await rpoint_svc.create_entity(
                     model_data=RoutePointCreate(
@@ -123,13 +101,8 @@ async def fetch_weather_for_mesh(
                 weather_point_ids.append(rp.id)
         else:
             weather_point_ids = [p.id for p in existing_weather_points]
-            print(f"Using {len(weather_point_ids)} existing weather points")
 
-        # Track statistics
         initial_stats = service.get_stats()
-
-        # Fetch weather data from API
-        print("Fetching weather data from Open-Meteo API...")
         weather_data = await service.fetch_batch(
             [(lat, lon) for lon, lat in weather_points_wgs84],
             priorities=None
@@ -137,7 +110,6 @@ async def fetch_weather_for_mesh(
 
         final_stats = service.get_stats()
 
-        # Process results with validation
         response_points = []
         successful = 0
         failed = 0
@@ -146,11 +118,8 @@ async def fetch_weather_for_mesh(
 
         for idx, data in weather_data.items():
             lon, lat = weather_points_wgs84[idx]
-
-            # Check if this is default/fallback data
             is_default = data.get('is_default', False)
 
-            # Validate data completeness
             required_fields = ['wind_speed', 'wind_direction', 'wave_height', 'wave_period']
             has_all_data = all(
                 field in data and data[field] is not None and np.isfinite(data[field])
@@ -158,38 +127,25 @@ async def fetch_weather_for_mesh(
             )
 
             if is_default:
-                if allow_defaults:
-                    print(f"⚠️ Point {idx}: Using default data (API failed)")
-                    failed += 1
-                else:
-                    print(f"❌ Point {idx}: Skipping - API failed, defaults not allowed")
-                    skipped += 1
-                    continue
+                skipped += 1
+                continue
             elif not has_all_data:
-                print(f"❌ Point {idx}: Skipping - incomplete data from API")
                 skipped += 1
                 continue
             else:
                 successful += 1
-                print(f"✓ Point {idx}: Valid data received")
 
-            # Save to database if requested and data is valid
             if save_to_db and idx < len(weather_point_ids):
-                # Additional validation before saving
                 wind_speed = data.get('wind_speed', 0.0)
                 wind_direction = data.get('wind_direction', 0.0)
 
-                # Sanity checks
                 if wind_speed < 0 or wind_speed > 50:  # m/s
-                    print(f"⚠️ Point {idx}: Unrealistic wind speed {wind_speed} m/s")
-                    if not allow_defaults:
-                        skipped += 1
-                        continue
+                    skipped += 1
+                    continue
 
                 if wind_direction < 0 or wind_direction >= 360:
                     wind_direction = wind_direction % 360
 
-                # Create forecast record
                 weather_forecast = await wf_svc.create_entity(
                     model_data=WeatherForecastCreate(
                         route_point_id=weather_point_ids[idx],
@@ -212,7 +168,6 @@ async def fetch_weather_for_mesh(
                     )
                 )
 
-            # Add to response
             response_points.append(WeatherPointResponse(
                 index=idx,
                 lat=lat,
@@ -234,7 +189,6 @@ async def fetch_weather_for_mesh(
                 is_default=is_default
             ))
 
-        # Update weather points metadata
         weather_points_metadata = {
             'points': [
                 {
@@ -257,21 +211,13 @@ async def fetch_weather_for_mesh(
         meshed.weather_points_json = json.dumps(weather_points_metadata)
         await session.commit()
 
-        print("\n" + "=" * 60)
-        print("WEATHER FETCHING SUMMARY")
         print("=" * 60)
-        print(f"✅ Successful: {successful} points")
-        print(f"❌ Failed: {failed} points")
-        print(f"⚠️ Skipped: {skipped} points")
-        print(f"📊 API calls: {final_stats['api_calls'] - initial_stats['api_calls']}")
-        print(f"💾 Cache hits: {final_stats['cache_hits'] - initial_stats['cache_hits']}")
+        print(f"Successful: {successful} points")
+        print(f"Failed: {failed} points")
+        print(f"Skipped: {skipped} points")
+        print(f"API calls: {final_stats['api_calls'] - initial_stats['api_calls']}")
+        print(f"Cache hits: {final_stats['cache_hits'] - initial_stats['cache_hits']}")
 
-        if successful < len(weather_points) * 0.5:
-            print(f"\n⚠️ WARNING: Only {successful}/{len(weather_points)} points have valid data!")
-            print("Consider:")
-            print("  1. Checking API connectivity")
-            print("  2. Verifying coordinates are in marine areas")
-            print("  3. Using allow_defaults=True for testing")
 
         return WeatherBatchResponse(
             meshed_area_id=meshed_area_id,
@@ -292,16 +238,8 @@ async def fetch_weather_for_mesh(
         raise HTTPException(500, f"Failed to fetch weather: {str(e)}")
 
 
-@router.get("/{meshed_area_id}/weather-validation",
-            status_code=200,
-            description="Check weather data validation status")
-async def validate_weather_data(
-        meshed_area_id: UUID4,
-        session: AsyncSession = Depends(get_async_session)
-):
-    """
-    Check which weather points have valid (non-default) data.
-    """
+@router.get("/{meshed_area_id}/weather-validation",status_code=200)
+async def validate_weather_data(meshed_area_id: UUID4, session: AsyncSession = Depends(get_async_session)):
     try:
         mesh_svc = MeshedAreaService(session)
         meshed = await mesh_svc.get_entity_by_id(meshed_area_id, allow_none=False)
@@ -309,7 +247,6 @@ async def validate_weather_data(
         if not meshed:
             raise HTTPException(404, f"MeshedArea {meshed_area_id} not found")
 
-        # Get weather points
         from app.services.db.services import RoutePointService
         rpoint_svc = RoutePointService(session)
 
@@ -325,7 +262,6 @@ async def validate_weather_data(
         validation_results = []
 
         for wp in weather_points:
-            # Get latest non-default forecast
             query = (
                 select(WeatherForecast)
                 .where(WeatherForecast.route_point_id == wp.id)
@@ -336,7 +272,6 @@ async def validate_weather_data(
             forecast = result.scalar_one_or_none()
 
             if forecast:
-                # Check if data is complete
                 is_valid = (
                         forecast.wind_speed is not None and
                         forecast.wind_direction is not None and
@@ -370,7 +305,6 @@ async def validate_weather_data(
                     "timestamp": None
                 })
 
-        # Summary statistics
         total = len(validation_results)
         with_data = sum(1 for r in validation_results if r['has_data'])
         valid = sum(1 for r in validation_results if r['is_valid'])
@@ -396,7 +330,6 @@ async def validate_weather_data(
 
 
 async def _extract_weather_points(meshed_area) -> List[tuple[float, float]]:
-    """Extract weather points from meshed area."""
     nodes = np.array(json.loads(meshed_area.nodes_json))
     step = max(1, len(nodes) // 30)
     selected_indices = list(range(0, len(nodes), step))[:30]

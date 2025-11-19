@@ -4,9 +4,15 @@ import json
 import numpy as np
 from pathlib import Path
 
+from shapely import wkt
+from shapely.geometry import Point
+from shapely.geometry import LineString
+
 from pydantic import UUID4
+from uuid import UUID
 from pyproj import Transformer
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -15,6 +21,7 @@ from fastapi import HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
 
+from app.models.models import WeatherForecast
 from app.core.database import get_db as get_async_session
 from app.services.db.services import MeshedAreaService
 from app.schemas.mesh import CreateRouteAndMeshIn
@@ -91,16 +98,11 @@ async def get_weather_points(
         meshed_area_id: UUID4,
         session: AsyncSession = Depends(get_async_session)
 ):
-    from sqlalchemy import select
-    from app.models.models import RoutePoint, WeatherForecast, RoutePointType
-    from uuid import UUID
-    from shapely import wkt
-    from shapely.geometry import Point, LineString
+
 
     svc = MeshedAreaService(session)
     meshed = await svc.get_entity_by_id(meshed_area_id, allow_none=False)
 
-    # Załaduj trasę dla określenia stref
     route_wkt_str = getattr(meshed, "route_wkt", None)
     route_geom = None
     if route_wkt_str:
@@ -121,12 +123,11 @@ async def get_weather_points(
                 "route_point_id": p.get('route_point_id'),
             }
 
-            # Określ strefę punktu
             point_geom = Point(p['x'], p['y'])
             zone = 'unknown'
             if route_geom and isinstance(route_geom, LineString):
                 distance = route_geom.distance(point_geom)
-                if distance <= 100:  # Na trasie lub bardzo blisko
+                if distance <= 100:
                     zone = 'route'
                 elif distance <= 500:
                     zone = 'near'
@@ -137,11 +138,9 @@ async def get_weather_points(
 
             props['zone'] = zone
 
-            # Pobierz najnowsze dane pogodowe dla tego punktu
             route_point_id_str = p.get('route_point_id')
             if route_point_id_str:
                 try:
-                    # Konwertuj string UUID na UUID
                     route_point_uuid = UUID(route_point_id_str) if isinstance(route_point_id_str,
                                                                               str) else route_point_id_str
 
@@ -239,7 +238,6 @@ async def get_contours(
         levels: str = Query("1,2,3,5,10,20,50"),
         session: AsyncSession = Depends(get_async_session)
 ):
-    """Zwraca izobaty dla obszaru."""
     svc = MeshedAreaService(session)
     m = await svc.get_entity_by_id(meshed_area_id, allow_none=False)
 
@@ -263,9 +261,6 @@ async def get_contours(
 
 @router.get("/{meshed_area_id}/view", response_class=HTMLResponse)
 async def view_mesh(meshed_area_id: UUID4):
-    """
-        Map view
-    """
     html = f"""
 <!DOCTYPE html>
 <html>

@@ -10,7 +10,6 @@ from datetime import timedelta
 
 
 class WeatherCache:
-    """Cache for weather data with Redis and in-memory fallback"""
     def __init__(self, redis_client: Optional[redis.Redis] = None, ttl: int = 3600):
         self.redis = redis_client
         self.ttl = ttl

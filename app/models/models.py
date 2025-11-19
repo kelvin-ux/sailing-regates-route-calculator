@@ -132,7 +132,6 @@ class Route(Base):
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     control_points: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="JSON string of control points")
     estimated_duration: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Estimated duration in hours")
-    actual_duration: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Actual duration in hours")
     difficulty_level: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="Difficulty level 1-10")
 
     

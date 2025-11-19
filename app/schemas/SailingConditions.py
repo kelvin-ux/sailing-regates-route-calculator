@@ -5,12 +5,6 @@ from dataclasses import dataclass
 
 @dataclass
 class SailingConditions:
-    """
-    Warunki żeglarskie w jednostkach morskich:
-    - prędkości w węzłach (knots)
-    - kierunki w stopniach (0-360)
-    - wysokości fal w metrach
-    """
     wind_speed: float  # knots
     wind_direction: float  # degrees (0-360, where 0 is North)
     wave_height: float  # meters
@@ -21,10 +15,6 @@ class SailingConditions:
 
     @classmethod
     def from_weather_data(cls, weather_data: Dict) -> 'SailingConditions':
-        """
-        Create SailingConditions from Marine API (open-meteo.com/v1/marine)
-        Konwertuje m/s na węzły gdzie potrzeba.
-        """
         required_fields = {
             "wind_speed_10m": "wind_speed",
             "wind_direction_10m": "wind_direction",
@@ -42,14 +32,11 @@ class SailingConditions:
         mapped = {}
         for api_key, model_key in required_fields.items():
             value = float(weather_data[api_key])
-
-            # Konwersja m/s -> knots dla prędkości
             if model_key in ["wind_speed", "current_velocity"]:
                 value = value * 1.94384  # m/s to knots
 
             mapped[model_key] = value
 
-        # Normalize angles to 0–360°
         mapped["wind_direction"] %= 360
         mapped["wave_direction"] %= 360
         mapped["current_direction"] %= 360
@@ -59,7 +46,6 @@ class SailingConditions:
 
 @dataclass
 class NavigationState:
-    """State of yacht at a navigation point"""
     position: Tuple[float, float]  # (x, y) in local coordinates
     heading: float  # degrees (0-360)
     speed: float  # knots

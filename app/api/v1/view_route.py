@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from fastapi.responses import HTMLResponse
 from pydantic import UUID4
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,13 +11,8 @@ import json
 router = APIRouter()
 
 
-@router.get("/{meshed_area_id}/route/view",
-            response_class=HTMLResponse,
-            description="Interactive map view of calculated sailing route")
-async def view_calculated_route(
-        meshed_area_id: UUID4,
-        session: AsyncSession = Depends(get_async_session)
-):
+@router.get("/{meshed_area_id}/route/view", response_class=HTMLResponse)
+async def view_calculated_route(meshed_area_id: UUID4, session: AsyncSession = Depends(get_async_session)):
     mesh_svc = MeshedAreaService(session)
     meshed = await mesh_svc.get_entity_by_id(meshed_area_id, allow_none=False)
 
@@ -29,7 +23,6 @@ async def view_calculated_route(
             media_type="text/html; charset=utf-8"
         )
 
-    # Pobierz zoptymalizowane segmenty z bazy danych
     segments_query = (
         select(RouteSegments)
         .where(RouteSegments.route_id == meshed.route_id)
@@ -39,10 +32,8 @@ async def view_calculated_route(
     result = await session.execute(segments_query)
     db_segments = result.scalars().all()
 
-    # Przygotuj dane segmentów do wyświetlenia
     segments_data = []
     for seg in db_segments:
-        # Pobierz punkty początkowy i końcowy
         from_point = await session.get(RoutePoint, seg.from_point)
         to_point = await session.get(RoutePoint, seg.to_point)
 
@@ -63,10 +54,8 @@ async def view_calculated_route(
                             seg.estimated_time / 60.0)) if seg.estimated_time and seg.estimated_time > 0 else 0
             })
 
-    # Jeśli nie ma segmentów w bazie, użyj danych z calculated_route_json
     if not segments_data and meshed.calculated_route_json:
         route_data = json.loads(meshed.calculated_route_json)
-        # Fallback to raw segments
         if 'route' in route_data and 'segments' in route_data['route']:
             for idx, seg in enumerate(route_data['route']['segments']):
                 segments_data.append({
@@ -83,7 +72,6 @@ async def view_calculated_route(
                     'boat_speed_knots': seg.get('boat_speed_knots', 0)
                 })
 
-    # Przygotuj JSON dla JavaScript
     segments_json = json.dumps(segments_data)
 
     html = f"""<!DOCTYPE html>
