@@ -23,6 +23,7 @@ from app.models.models import RoutePoint
 from app.models.models import RoutePointType
 from app.models.models import WeatherForecast
 from app.models.models import MeshedArea
+from app.models.models import Route
 
 from app.services.db.services import RouteService
 from app.services.db.services import YachtService
@@ -422,6 +423,14 @@ async def calculate_optimal_route(meshed_area_id: UUID4, min_depth: float = 3.0,
             )
 
             session.add(new_segment)
+
+        final_total_time_minutes = sum(seg.total_time_hours * 60 for seg in optimized_segments)
+        stmt_route = (
+            update(Route)
+            .where(Route.id == meshed.route_id)
+            .values(estimated_time=final_total_time_minutes)
+        )
+        await session.execute(stmt_route)
 
         await session.commit()
 
