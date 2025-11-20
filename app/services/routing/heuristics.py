@@ -11,13 +11,7 @@ from scipy.spatial import KDTree
 
 from app.models.models import Yacht
 from app.schemas.SailingConditions import SailingConditions
-from app.services.logger import (
-    log_edge,
-    log_impassable,
-    log_weather,
-    log_debug,
-    log_error
-)
+
 
 class SailingHeuristics:
     """
@@ -128,10 +122,8 @@ class SailingHeuristics:
         comfort_penalty = self._calculate_comfort_penalty(to_conditions)
         time_cost *= (1.0 + comfort_penalty)
 
-        log_edge(from_idx, to_idx, to_twa, boat_speed, avg_wind_speed_ms, time_cost)
 
         if boat_speed <= 0.01:
-            log_impassable(from_idx, to_idx, "boat_speed=0")
             return float("inf")
         # Add crew fatigue factor for very long segments
         if distance > 10000:  # More than 10km
@@ -170,14 +162,6 @@ class SailingHeuristics:
     def _get_conditions_at_vertex(self, vertex_idx: int) -> SailingConditions:
         """Get weather conditions at a navigation vertex."""
         weather_idx = self.nav_to_weather.get(vertex_idx)
-
-        if weather_idx is None:
-            log_weather(vertex_idx, None, "NO weather mapping")
-
-        if weather_idx not in self.weather_data:
-            log_weather(vertex_idx, weather_idx, "Missing weather data")
-
-        log_weather(vertex_idx, weather_idx, "OK")
 
         if weather_idx is not None and weather_idx in self.weather_data:
             return SailingConditions.from_weather_data(self.weather_data[weather_idx])
@@ -587,7 +571,6 @@ class SailingRouter:
 
         while open_set:
             current_f, current = heapq.heappop(open_set)
-            log_debug(f"Checking edges for vertex {current}")
             if current == goal_idx:
                 # Reconstruct path
                 path = []
@@ -604,7 +587,6 @@ class SailingRouter:
 
             # Check all neighbors
             for neighbor in self.graph.get(current, []):
-                log_debug(f"Checking neighbor {neighbor} from {current}")
                 if neighbor in closed_set:
                     continue
 
@@ -625,12 +607,8 @@ class SailingRouter:
                     previous_heading
                 )
 
-                # Skip if infinite cost (impassable)
                 if edge_cost == float('inf'):
-                    log_impassable(current, neighbor, "cost=inf")
                     continue
-                else:
-                    log_debug(f"edge_cost OK: {current}->{neighbor} cost={edge_cost:.2f}")
 
                 tentative_g = g_score[current] + edge_cost
 
