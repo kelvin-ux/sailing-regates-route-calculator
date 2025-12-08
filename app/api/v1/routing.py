@@ -428,7 +428,7 @@ async def calculate_optimal_route(meshed_area_id: UUID4, min_depth: float = 3.0,
         stmt_route = (
             update(Route)
             .where(Route.id == meshed.route_id)
-            .values(estimated_time=final_total_time_minutes)
+            .values(estimated_duration=final_total_time_minutes)
         )
         await session.execute(stmt_route)
 

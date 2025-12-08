@@ -5,15 +5,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.models import Yacht, YachtType
 
 YACHT_IDS = {
-    "CLASS_40": "11111111-1111-1111-1111-11111111111a",
-    "VOLVO_65": "22222222-2222-2222-2222-22222222222b",
-    "OMEGA": "33333333-3333-3333-3333-33333333333c",
-    "BAVARIA_46": "44444444-4444-4444-4444-44444444444d",
-    "OYSTER_72": "55555555-5555-5555-5555-55555555555e",
-    "TP_52": "66666666-6666-6666-6666-66666666666f",
-    "IMOCA_60": "77777777-7777-7777-7777-77777777777a"
+    "CLASS_40": "c6d1d8ca-4a7c-4c81-a3aa-1fb2f1b6c3af",
+    "VOLVO_65": "0f0c9d6f-92e4-4c52-bc1b-1cc2aeac70e1",
+    "OMEGA": "d3bb2c1e-0d7d-49e6-a1bf-2abf1b185ed9",
+    "BAVARIA_46": "b59f8c3e-f0ea-4b3e-bd12-92c8529db41a",
+    "OYSTER_72": "7e4e8a04-a8b2-4cc4-97dd-93f6e6e1a087",
+    "TP_52": "f5a2eaf1-1b55-4a0f-a9a4-e6a2f8db5c76",
+    "IMOCA_60": "3bfeb2a0-d59a-4f15-8e0b-7d9b77cbd789"
 }
-
 
 def _generate_simple_polars(max_speed: float) -> Dict[str, Any]:
     twa_angles = [0, 30, 52, 60, 75, 90, 110, 120, 135, 150, 180]
