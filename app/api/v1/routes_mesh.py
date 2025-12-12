@@ -49,7 +49,7 @@ async def create_route_and_mesh_ep(
     ```json
        {
       "user_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-      "yacht_id": "f0dde3aa-64a0-4c10-a512-e0b3391b2d1f",
+      "yacht_id": "c6d1d8ca-4a7c-4c81-a3aa-1fb2f1b6c3af",
       "points": [
         {
           "lat": 54.529300,
