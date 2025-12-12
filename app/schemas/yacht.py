@@ -14,18 +14,18 @@ from app.models.models import YachtType
 class YachtCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     yacht_type: YachtType
-    length: float = Field(..., gt=0, description="Length in feet")
-    beam: float = Field(..., gt=0, description="Beam in feet")
-    draft: Optional[float] = Field(None, gt=0, description="Draft in feet")
-    sail_number: Optional[int] = Field(default=2, le=30, description="Number of sails")
+    length: float = Field(..., gt=0)
+    beam: float = Field(..., gt=0)
+    draft: Optional[float] = Field(None, gt=0)
+    sail_number: Optional[int] = Field(default=2, le=30)
     has_spinnaker: bool = False
     has_genaker: bool = False
-    max_speed: Optional[float] = Field(None, gt=0, description="Maximum speed in knots")
-    max_wind_speed: Optional[float] = Field(None, gt=0, description="Maximum safe wind speed in m/s")
+    max_speed: Optional[float] = Field(None, gt=0)
+    max_wind_speed: Optional[float] = Field(None, gt=0)
     amount_of_crew: Optional[int] = Field(None, ge=1)
-    tack_time: Optional[float] = Field(None, ge=0, description="Time in minutes for tack")
-    jibe_time: Optional[float] = Field(None, ge=0, description="Time in minutes for jibe")
-    polar_data: Optional[Dict[str, Any]] = Field(None,description="Polar chart data for performance calculations")
+    tack_time: Optional[float] = Field(None, ge=0)
+    jibe_time: Optional[float] = Field(None, ge=0)
+    polar_data: Optional[Dict[str, Any]] = Field(None)
 
 
 class YachtUpdate(BaseModel):

@@ -26,7 +26,7 @@ from app.schemas.WeatherMeshConfig import WeatherMeshConfig
 
 from app.models.models import RoutePointType
 
-from app.services.db.services import MeshedAreaService
+from app.services.db.services import MeshedAreaService, YachtService
 from app.services.db.services import RoutePointService
 from app.services.db.services import RouteService
 from app.services.geodata.corridor import _to_proj
@@ -115,7 +115,6 @@ class WeatherPointSelector:
                         water_polygon,
                         max_points: int,
                         grid_spacing: float) -> List[Tuple[float, float]]:
-        """Wybór przez regularną siatkę"""
         bounds = water_polygon.bounds  # (minx, miny, maxx, maxy)
 
         width = bounds[2] - bounds[0]
@@ -144,9 +143,6 @@ class WeatherPointSelector:
 class WeatherDataInterpolator:
     @staticmethod
     def create_mapping(weather_points: List[Tuple[float, float]], nav_vertices: np.ndarray) -> Dict[int, List[int]]:
-        """
-        creates mapping: weather_point_idx -> nav vertex | kazdy punkt dostaje przypisany weather point
-        """
         weather_tree = KDTree(weather_points)
         mapping = {i: [] for i in range(len(weather_points))}
         for nav_idx, nav_vertex in enumerate(nav_vertices):
@@ -157,10 +153,6 @@ class WeatherDataInterpolator:
 
     @staticmethod
     def interpolate_weather_data(weather_data: Dict[int, Dict], mapping: Dict[int, List[int]], nav_vertices: np.ndarray) -> np.ndarray:
-        """
-        Interpoluje dane pogodowe na wszystkie punkty nawigacyjne
-        Zwraca tablice z danymi pogodowymi dla każdego punktu nawigacyjnego
-        """
         nav_weather = np.zeros((len(nav_vertices), 2))  # [wind_speed, wind_dir]
 
         for weather_idx, nav_indices in mapping.items():
@@ -175,9 +167,6 @@ class WeatherDataInterpolator:
 
 
 async def create_route_and_mesh(session: AsyncSession, payload: CreateRouteAndMeshIn, weather_config: Optional[WeatherMeshConfig] = None) -> Dict[str, Any]:
-    """
-    Zwraca dict z route_id, mesh_id, weather_points, navigation_mesh
-    """
     if not weather_config:
         weather_config = WeatherMeshConfig()
 
@@ -187,6 +176,10 @@ async def create_route_and_mesh(session: AsyncSession, payload: CreateRouteAndMe
     route_svc = RouteService(session)
     rpoint_svc = RoutePointService(session)
     mesh_svc = MeshedAreaService(session)
+    yacht_svc = YachtService(session)
+
+    if await yacht_svc.get_entity_by_id(payload.yacht_id) is None:
+        raise ValueError("Provide valid yacht id")
 
     ctrl_json = json.dumps([[p.lon, p.lat] for p in payload.points])
     route = await route_svc.create_entity(
@@ -247,9 +240,14 @@ async def create_route_and_mesh(session: AsyncSession, payload: CreateRouteAndMe
         pass
 
     if needs_detour:
-        start_xy = (route_xy.coords[0][0], route_xy.coords[0][1])
-        end_xy = (route_xy.coords[-1][0], route_xy.coords[-1][1])
-        safe_line = safe_polyline(water_xy, start_xy, end_xy, coarse_area=250000.0, fairway=None)
+        all_waypoints = list(route_xy.coords)
+        safe_line = safe_polyline(
+            water_xy,
+            all_waypoints,
+            coarse_area=5000.0,
+            fairway=None
+        )
+
         if safe_line is not None:
             route_xy = safe_line
             corridor_xy = route_xy.buffer(buffer_m, cap_style=2, join_style=2)

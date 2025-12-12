@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import aiohttp
 import redis.asyncio as redis
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import List
 from typing import Dict
 from typing import Optional
@@ -13,6 +13,7 @@ from app.schemas.weather import MarineWeatherRequest
 from app.services.weather.WeatherCache import WeatherCache
 from app.services.weather.RateLimiter import RateLimiter
 
+from app.services.warsawtz import parse_datetime_warsaw, WARSAW_TZ, now_warsaw
 
 class OpenMeteoService:
     def __init__(self,
@@ -65,8 +66,214 @@ class OpenMeteoService:
                 self.stats['errors'] += 1
                 return self._default_marine_weather()
 
-    async def _fetch_from_api(self, lat: float, lon: float) -> Dict:
+    async def fetch_marine_weather_at_time(self, lat: float, lon: float, target_time: datetime) -> Dict:
+        """
+        Fetch marine weather forecast for a specific time.
+        Uses hourly forecast data and finds the closest hour.
+        """
+        self.stats['total_requests'] += 1
 
+        if target_time.tzinfo is None:
+            target_time = target_time.replace(tzinfo=WARSAW_TZ)
+
+        target_hour = target_time.replace(minute=0, second=0, microsecond=0)
+        cache_key = f"marine_forecast:{lat:.2f}:{lon:.2f}:{target_hour.isoformat()}"
+
+        cached = await self.cache.get(cache_key)
+        if cached:
+            self.stats['cache_hits'] += 1
+            return cached
+
+        async with self.rate_limiter:
+            self.stats['api_calls'] += 1
+
+            try:
+                weather_data = await self._fetch_forecast_at_time(lat, lon, target_time)
+                await self.cache.set(cache_key, weather_data)
+                return weather_data
+
+            except Exception as e:
+                print(f"Open-Meteo Forecast API error: {e}")
+                self.stats['errors'] += 1
+                return self._default_marine_weather()
+
+    async def _fetch_forecast_at_time(self, lat: float, lon: float, target_time: datetime) -> Dict:
+        """Fetch hourly forecast and extract data for specific time."""
+
+        async with aiohttp.ClientSession() as session:
+            now = datetime.now(WARSAW_TZ)
+            days_ahead = max(1, (target_time - now).days + 2)
+            days_ahead = min(days_ahead, 7)  # Max 7 days forecast
+
+            marine_params = {
+                'latitude': lat,
+                'longitude': lon,
+                'hourly': ','.join([
+                    'wave_height',
+                    'wave_direction',
+                    'wave_period',
+                    'wind_wave_height',
+                    'wind_wave_direction',
+                    'wind_wave_period',
+                    'swell_wave_height',
+                    'swell_wave_direction',
+                    'swell_wave_period',
+                ]),
+                'forecast_days': days_ahead,
+                'timezone': 'auto'
+            }
+
+            weather_params = {
+                'latitude': lat,
+                'longitude': lon,
+                'hourly': ','.join([
+                    'temperature_2m',
+                    'relative_humidity_2m',
+                    'pressure_msl',
+                    'wind_speed_10m',
+                    'wind_direction_10m',
+                    'wind_gusts_10m'
+                ]),
+                'forecast_days': days_ahead,
+                'timezone': 'auto'
+            }
+
+            marine_task = session.get(self.marine_url, params=marine_params, timeout=15)
+            weather_task = session.get(f"{self.base_url}/forecast", params=weather_params, timeout=15)
+
+            marine_response, weather_response = await asyncio.gather(
+                marine_task, weather_task, return_exceptions=True
+            )
+
+            marine_hourly = {}
+            weather_hourly = {}
+            time_index = None
+
+            if isinstance(marine_response, aiohttp.ClientResponse) and marine_response.status == 200:
+                marine_json = await marine_response.json()
+                if 'hourly' in marine_json:
+                    marine_hourly = marine_json['hourly']
+                    times = marine_hourly.get('time', [])
+                    time_index = self._find_closest_time_index(times, target_time)
+
+            if isinstance(weather_response, aiohttp.ClientResponse) and weather_response.status == 200:
+                weather_json = await weather_response.json()
+                if 'hourly' in weather_json:
+                    weather_hourly = weather_json['hourly']
+                    if time_index is None:
+                        times = weather_hourly.get('time', [])
+                        time_index = self._find_closest_time_index(times, target_time)
+
+            if time_index is None:
+                print(f"Could not find time index for {target_time}")
+                return self._default_marine_weather()
+
+            def safe_get(data: dict, key: str, idx: int, default=None):
+                arr = data.get(key, [])
+                if arr and idx < len(arr):
+                    val = arr[idx]
+                    return val if val is not None else default
+                return default
+
+            return {
+                'wind_speed': safe_get(weather_hourly, 'wind_speed_10m', time_index, 5.0),
+                'wind_direction': safe_get(weather_hourly, 'wind_direction_10m', time_index, 0.0),
+                'wind_gusts': safe_get(weather_hourly, 'wind_gusts_10m', time_index, 7.0),
+
+                'wave_height': safe_get(marine_hourly, 'wave_height', time_index, 0.5),
+                'wave_direction': safe_get(marine_hourly, 'wave_direction', time_index, 0.0),
+                'wave_period': safe_get(marine_hourly, 'wave_period', time_index, 4.0),
+
+                'wind_wave_height': safe_get(marine_hourly, 'wind_wave_height', time_index, 0.3),
+                'wind_wave_direction': safe_get(marine_hourly, 'wind_wave_direction', time_index, 0.0),
+                'wind_wave_period': safe_get(marine_hourly, 'wind_wave_period', time_index, 3.0),
+
+                'swell_wave_height': safe_get(marine_hourly, 'swell_wave_height', time_index, 0.2),
+                'swell_wave_direction': safe_get(marine_hourly, 'swell_wave_direction', time_index, 0.0),
+                'swell_wave_period': safe_get(marine_hourly, 'swell_wave_period', time_index, 6.0),
+
+                'current_velocity': 0.1,  # Not available in hourly, use default
+                'current_direction': 0.0,
+
+                'temperature': safe_get(weather_hourly, 'temperature_2m', time_index, 15.0),
+                'humidity': safe_get(weather_hourly, 'relative_humidity_2m', time_index, 70.0),
+                'pressure': safe_get(weather_hourly, 'pressure_msl', time_index, 1013.0),
+
+                'timestamp': target_time.isoformat(),
+                'forecast_time': target_time.isoformat(),
+                'coords': {'lat': lat, 'lon': lon},
+                'source': 'open-meteo-forecast',
+                'is_default': False
+            }
+
+    def _find_closest_time_index(self, times: List[str], target_time: datetime) -> Optional[int]:
+        """Find index of closest time in the forecast array."""
+        if not times:
+            return None
+
+        if target_time.tzinfo is None:
+            target_time = target_time.replace(tzinfo=WARSAW_TZ)
+
+        min_diff = None
+        best_idx = None
+
+        for idx, time_str in enumerate(times):
+            try:
+                forecast_time = datetime.fromisoformat(time_str)
+                if forecast_time.tzinfo is None:
+                    forecast_time = forecast_time.replace(tzinfo=WARSAW_TZ)
+
+                diff = abs((forecast_time - target_time).total_seconds())
+
+                if min_diff is None or diff < min_diff:
+                    min_diff = diff
+                    best_idx = idx
+            except Exception:
+                continue
+
+        return best_idx
+
+    async def fetch_batch_at_time(self,
+                                  points: List[Tuple[float, float]],
+                                  target_time: datetime,
+                                  priorities: Optional[List[int]] = None) -> Dict[int, Dict]:
+        """
+        Fetch weather forecast for multiple points at a specific time.
+        """
+        if not priorities:
+            priorities = [0] * len(points)
+
+        sorted_points = sorted(
+            enumerate(zip(points, priorities)),
+            key=lambda x: x[1][1],
+            reverse=True
+        )
+
+        results = {}
+
+        batch_size = 10
+        for i in range(0, len(sorted_points), batch_size):
+            batch = sorted_points[i:i + batch_size]
+
+            tasks = []
+            for idx, ((lat, lon), priority) in batch:
+                task = self.fetch_marine_weather_at_time(lat, lon, target_time)
+                tasks.append((idx, task))
+
+            for idx, task in tasks:
+                try:
+                    result = await task
+                    results[idx] = result
+                except Exception as e:
+                    print(f"Failed to fetch weather for point {idx}: {e}")
+                    results[idx] = self._default_marine_weather()
+
+            if i + batch_size < len(sorted_points):
+                await asyncio.sleep(0.2)
+
+        return results
+
+    async def _fetch_from_api(self, lat: float, lon: float) -> Dict:
         async with aiohttp.ClientSession() as session:
             marine_params = {
                 'latitude': lat,

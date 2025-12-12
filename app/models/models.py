@@ -93,7 +93,8 @@ class Yacht(Base):
     sail_number: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     has_spinnaker: Mapped[bool] = mapped_column(Boolean, default=False)
     has_genaker: Mapped[bool] = mapped_column(Boolean, default=False)
-    polar_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="Polar chart data (speed vs wind angle)")
+    polar_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True,
+                                                       comment="Polar chart data (speed vs wind angle)")
     max_speed: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Maximum speed in knots")
     max_wind_speed: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Maximum safe wind speed")
     draft: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Draft in meters")
@@ -101,7 +102,6 @@ class Yacht(Base):
     tack_time: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Average tack time")
     jibe_time: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Average jibe time")
 
-    
     routes: Mapped[List["Route"]] = relationship("Route", back_populates="yacht")
 
 
@@ -116,12 +116,12 @@ class Obstacle(Base):
     valid_from: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     valid_to: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
-    
     routes: Mapped[List["Route"]] = relationship(
-        "Route", 
-        secondary=route_obstacles_association, 
+        "Route",
+        secondary=route_obstacles_association,
         back_populates="obstacles"
     )
+
 
 class Route(Base):
     __tablename__ = "route"
@@ -131,21 +131,21 @@ class Route(Base):
     yacht_id: Mapped[UUID] = mapped_column(ForeignKey("yacht.id"), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     control_points: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="JSON string of control points")
-    estimated_duration: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Estimated duration in hours")
-    actual_duration: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Actual duration in hours")
+    estimated_duration: Mapped[Optional[float]] = mapped_column(Float, nullable=True,
+                                                                comment="Estimated duration in hours")
     difficulty_level: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="Difficulty level 1-10")
 
-    
     yacht: Mapped["Yacht"] = relationship("Yacht", back_populates="routes")
     route_points: Mapped[List["RoutePoint"]] = relationship("RoutePoint", back_populates="route")
     control_points_rel: Mapped[List["ControlPoint"]] = relationship("ControlPoint", back_populates="route")
     route_segments: Mapped[List["RouteSegments"]] = relationship("RouteSegments", back_populates="route")
     obstacles: Mapped[List["Obstacle"]] = relationship(
-        "Obstacle", 
-        secondary=route_obstacles_association, 
+        "Obstacle",
+        secondary=route_obstacles_association,
         back_populates="routes"
     )
     meshed_areas: Mapped[List["MeshedArea"]] = relationship("MeshedArea", back_populates="route")
+
 
 class RoutePoint(Base):
     __tablename__ = "route_point"
@@ -153,24 +153,25 @@ class RoutePoint(Base):
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), default=uuid4, primary_key=True)
     route_id: Mapped[UUID] = mapped_column(ForeignKey("route.id"), nullable=False)
     meshed_area_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("meshed_area.id"), nullable=True)
-    point_type: Mapped[RoutePointType] = mapped_column(Enum(RoutePointType, name="route_point_type", native_enum = True, create_type = False, validate_string = True), nullable=False, default=RoutePointType.NAVIGATION)
+    point_type: Mapped[RoutePointType] = mapped_column(
+        Enum(RoutePointType, name="route_point_type", native_enum=True, create_type=False, validate_string=True),
+        nullable=False, default=RoutePointType.NAVIGATION)
     seq_idx: Mapped[int] = mapped_column(Integer, nullable=False, comment="Sequence index in route")
     x: Mapped[float] = mapped_column(Float, nullable=False, comment="Longitude")
     y: Mapped[float] = mapped_column(Float, nullable=False, comment="Latitude")
     timestamp: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     heuristic_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="A* heuristic score")
 
-    
     route: Mapped["Route"] = relationship("Route", back_populates="route_points")
     meshed_area: Mapped[Optional["MeshedArea"]] = relationship("MeshedArea", back_populates="route_points")
     weather_forecasts: Mapped[List["WeatherForecast"]] = relationship("WeatherForecast", back_populates="route_point")
     segments_from: Mapped[List["RouteSegments"]] = relationship(
-        "RouteSegments", 
+        "RouteSegments",
         foreign_keys="RouteSegments.from_point",
         back_populates="from_point_rel"
     )
     segments_to: Mapped[List["RouteSegments"]] = relationship(
-        "RouteSegments", 
+        "RouteSegments",
         foreign_keys="RouteSegments.to_point",
         back_populates="to_point_rel"
     )
@@ -226,7 +227,6 @@ class ControlPoint(Base):
     type: Mapped[ControlPointType] = mapped_column(Enum(ControlPointType), nullable=False)
     desc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    
     route: Mapped["Route"] = relationship("Route", back_populates="control_points_rel")
 
 class RouteSegments(Base):
@@ -249,12 +249,12 @@ class RouteSegments(Base):
 
     route: Mapped["Route"] = relationship("Route", back_populates="route_segments")
     from_point_rel: Mapped["RoutePoint"] = relationship(
-        "RoutePoint", 
+        "RoutePoint",
         foreign_keys=[from_point],
         back_populates="segments_from"
     )
     to_point_rel: Mapped["RoutePoint"] = relationship(
-        "RoutePoint", 
+        "RoutePoint",
         foreign_keys=[to_point],
         back_populates="segments_to"
     )
@@ -269,6 +269,8 @@ class MeshedArea(Base):
 
     nodes_json: Mapped[str] = mapped_column(Text, nullable=False, comment="[[x,y],...] w lokalnym CRS (metry)")
     triangles_json: Mapped[str] = mapped_column(Text, nullable=False, comment="[[i,j,k],...] indeksy węzłów")
+    calculated_route_json = Column(Text, nullable=True)
+    calculated_route_timestamp = Column(DateTime, nullable=True)
 
     water_wkt: Mapped[str] = mapped_column(Text, nullable=False)
     route_wkt: Mapped[str] = mapped_column(Text, nullable=False)
@@ -283,6 +285,45 @@ class MeshedArea(Base):
 
     route: Mapped["Route"] = relationship("Route", back_populates="meshed_areas")
     route_points: Mapped[List["RoutePoint"]] = relationship("RoutePoint", back_populates="meshed_area")
+    route_variants: Mapped[List["RouteVariant"]] = relationship("RouteVariant", back_populates="meshed_area",
+                                                                cascade="all, delete-orphan")
+
+
+class RouteVariant(Base):
+    __tablename__ = "route_variant"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    meshed_area_id: Mapped[UUID] = mapped_column(ForeignKey("meshed_area.id"), nullable=False)
+
+    departure_time: Mapped[datetime] = mapped_column(DateTime, nullable=False,
+                                                     comment="Planned departure time for this variant")
+    variant_order: Mapped[int] = mapped_column(Integer, nullable=False, comment="Order in time window (0, 1, 2...)")
+
+    # Route data
+    waypoints_json: Mapped[str] = mapped_column(Text, nullable=False, comment="[[lon,lat],...] waypoints in WGS84")
+    segments_json: Mapped[str] = mapped_column(Text, nullable=False, comment="Segment details as JSON")
+
+    # Summary stats
+    total_time_hours: Mapped[float] = mapped_column(Float, nullable=False)
+    total_distance_nm: Mapped[float] = mapped_column(Float, nullable=False)
+    average_speed_knots: Mapped[float] = mapped_column(Float, nullable=False)
+
+    # Weather conditions summary
+    avg_wind_speed: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Average wind speed in knots")
+    avg_wind_direction: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    avg_wave_height: Mapped[Optional[float]] = mapped_column(Float, nullable=True,
+                                                             comment="Average wave height in meters")
+
+    # Maneuver counts
+    tacks_count: Mapped[int] = mapped_column(Integer, default=0)
+    jibes_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Flags
+    is_best: Mapped[bool] = mapped_column(Boolean, default=False, comment="Whether this is the recommended variant")
+    is_selected: Mapped[bool] = mapped_column(Boolean, default=False, comment="User-selected for display")
+
+    # Relationships
+    meshed_area: Mapped["MeshedArea"] = relationship("MeshedArea", back_populates="route_variants")
 
 
 Index('idx_route_yacht_id', Route.yacht_id)
@@ -298,3 +339,5 @@ Index('idx_control_point_route_id', ControlPoint.route_id)
 
 Index('idx_route_point_route_seq', RoutePoint.route_id, RoutePoint.seq_idx)
 Index('idx_weather_forecast_point_time', WeatherForecast.route_point_id, WeatherForecast.forecast_timestamp)
+Index('idx_route_variant_meshed_area', RouteVariant.meshed_area_id)
+Index('idx_route_variant_departure', RouteVariant.departure_time)

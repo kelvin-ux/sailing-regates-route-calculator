@@ -9,7 +9,6 @@ from app.schemas.WeatherMeshConfig import WeatherMeshConfig
 
 from shapely.geometry import Point
 from shapely.geometry import LineString
-from sklearn.cluster import KMeans
 from scipy.spatial import KDTree
 
 
@@ -82,11 +81,7 @@ class ZonalWeatherPointSelector:
             'far': vertices[far_mask]
         }
 
-    def _sample_along_route_in_zone(self, route: LineString, count: int, max_distance: float) -> List[
-        Tuple[float, float]]:
-        """
-        Próbkuje punkty równomiernie wzdłuż trasy, z możliwością przesunięcia w bok
-        """
+    def _sample_along_route_in_zone(self, route: LineString, count: int, max_distance: float) -> List[Tuple[float, float]]:
         if count <= 0:
             return []
 

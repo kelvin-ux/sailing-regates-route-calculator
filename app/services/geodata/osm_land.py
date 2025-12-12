@@ -10,8 +10,7 @@ OSM_LAND_URL = "https://osmdata.openstreetmap.de/download/land-polygons-split-43
 
 def ensure_land_polygons(cache_dir: Path) -> Path:
     """
-    Pobiera i rozpakowuje land-polygons (WGS84). Zwraca ścieżkę do pliku .gpkg.
-    Obsługuje sytuację, gdy shapefile znajduje się w podkatalogu archiwum.
+    Pobiera i rozpakowuje land-polygons. Zwraca ścieżkę do pliku .gpkg.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
     zip_path = cache_dir / "land-polygons-split-4326.zip"
@@ -35,16 +34,16 @@ def ensure_land_polygons(cache_dir: Path) -> Path:
                 f"Sprawdź zawartość {extract_dir}"
             )
 
-        gdf = gpd.read_file(shp_files[0])  # WGS84 (EPSG:4326)
+        gdf = gpd.read_file(shp_files[0])
         if gdf.crs is None:
             gdf = gdf.set_crs(4326)
-        gdf.to_file(gpkg_path, driver="GPKG")  # zapis trwały i szybki do ponownych odczytów
+        gdf.to_file(gpkg_path, driver="GPKG")
 
     return gpkg_path
 
 def land_in_bbox(gpkg_path: Path, bbox_wgs84: Tuple[float, float, float, float]) -> gpd.GeoDataFrame:
     """
-    Zwraca ląd przycięty do bboxu (WGS84). bbox = (south, west, north, east)
+    Zwraca ląd przycięty do bboxu --> bbox = (south, west, north, east)
     """
     gdf = gpd.read_file(gpkg_path)
     west, east = bbox_wgs84[1], bbox_wgs84[3]

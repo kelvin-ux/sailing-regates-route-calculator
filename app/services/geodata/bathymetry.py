@@ -84,10 +84,6 @@ def shallow_mask_from_tif(tif_path: Path, epsg_target: int, threshold_m: float) 
         return shp_local
 
 def contours_geojson_from_tif(tif_path: Path, levels: Iterable[float]) -> Dict[str, Any]:
-    """
-    Generuje GeoJSON z izobatami w CRS rastra (WGS84).
-    Robimy to poprzez 'marching squares' rasterio+numpy
-    """
     features = []
     with rasterio.open(tif_path) as ds:
         arr = ds.read(1).astype("float32")
@@ -97,7 +93,6 @@ def contours_geojson_from_tif(tif_path: Path, levels: Iterable[float]) -> Dict[s
         if np.nanmin(arr) < 0:
             arr = np.abs(arr)
         for lvl in sorted(levels):
-            # maska: bliskie poziomu (okno tolerancji  - 0.15 m)
             tol = max(0.15, 0.01 * lvl)
             band = np.where(np.isnan(arr), 0, ((arr >= (lvl - tol)) & (arr <= (lvl + tol))).astype("uint8"))
             for geom, val in rio_shapes(band, mask=band.astype(bool), transform=ds.transform):
@@ -139,10 +134,6 @@ def label_points_along_lines(fc: Dict[str, Any], step_m: float = 1500.0) -> Dict
     return {"type": "FeatureCollection", "features": labels}
 
 def bands_geojson_from_tif(tif_path: Path, levels: List[float]) -> Dict[str, Any]:
-    """
-    Zwraca poligony pasm głębokości (levels definiuje granice: [0,1,2,3,5,10,...]).
-    Każda cecha ma props: band_min, band_max.
-    """
     features = []
     with rasterio.open(tif_path) as ds:
         arr = ds.read(1).astype("float32")

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import List
 from typing import Dict
 from typing import Any
 
 import numpy as np
+
 from shapely import geometry as shp
 from shapely.geometry import Polygon
 from shapely.geometry import MultiPolygon
@@ -15,30 +15,9 @@ from shapely.validation import make_valid as _make_valid
 
 import triangle as tr
 
-
-@dataclass
-class MeshZones:
-    """
-    radii_m: [r1, r2, r3]  (metry od linii trasy: near, mid, far)
-    max_area_m2: [a1, a2, a3]
-    """
-    radii_m: List[float]
-    max_area_m2: List[float]
-
-    def __post_init__(self):
-        r = self.radii_m
-        a = self.max_area_m2
-        if len(r) != 3 or len(a) != 3:
-            raise ValueError("MeshZones.radii_m i max_area_m2 muszą mieć długość 3.")
-        if not (r[0] > 0 and r[1] > r[0] and r[2] > r[1]):
-            raise ValueError("radii_m muszą być rosnące i dodatnie (r1 < r2 < r3).")
-        if not (a[0] > 0 and a[1] >= a[0] and a[2] >= a[1]):
-            raise ValueError("max_area_m2 muszą być dodatnie i niemalejące (a1 <= a2 <= a3).")
-
+from app.schemas.meshzones import MeshZones
 
 _EPS_AREA = 1e-6  # m^2
-
-
 
 def _valid_geom(g: shp.base.BaseGeometry) -> shp.base.BaseGeometry:
     if g is None or g.is_empty:
@@ -239,7 +218,7 @@ def triangulate_water(water_xy: shp.base.BaseGeometry,
         except Exception:
             pass
     if g_ero is None or g_ero.is_empty:
-        g_ero = g_raw  # fallback
+        g_ero = g_raw
 
     # rozłączne strefy
     near = _valid_geom(g_raw.intersection(B1))
