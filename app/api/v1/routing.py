@@ -43,6 +43,7 @@ from app.services.weather.validator import WeatherDataValidator
 from app.services.weather.weather_api_manager import OpenMeteoService
 
 from app.services.routing.time_window import TimeWindowRequest
+from app.services.routing.diff_calc import RouteDifficultyCalculator
 router = APIRouter()
 
 _weather_service: Optional[OpenMeteoService] = None
@@ -557,6 +558,15 @@ async def calculate_optimal_route(
         if not variants_results:
             raise HTTPException(400, "No navigable routes found for any time point.")
 
+        difficulty_calculator = RouteDifficultyCalculator()
+        difficulty_result = difficulty_calculator.calculate_for_variants(variants_results)
+        overall_difficulty = round(difficulty_result["overall_score"])
+        stmt_route = (
+            update(Route)
+            .where(Route.id == meshed.route_id)
+            .values(difficulty_level=overall_difficulty))
+        await session.execute(stmt_route)
+
         best_variant_idx = min(range(len(variants_results)), key=lambda i: variants_results[i]['total_time_hours'])
 
         saved_variants = []
@@ -582,6 +592,8 @@ async def calculate_optimal_route(
             session.add(variant)
             await session.flush()
 
+            variant_difficulty = difficulty_result["variants"][idx]
+
             saved_variants.append({
                 "variant_id": str(variant.id),
                 "departure_time": variant_data['departure_time'].isoformat(),
@@ -593,7 +605,9 @@ async def calculate_optimal_route(
                 "tacks_count": variant_data['tacks_count'],
                 "jibes_count": variant_data['jibes_count'],
                 "is_best": is_best,
-                "segments_count": len(variant_data['segments'])
+                "segments_count": len(variant_data['segments']),
+                "difficulty_score": round(variant_difficulty.calculate_total(), 2),
+                "difficulty_level": variant_difficulty.get_level().value
             })
 
         best_variant_data = variants_results[best_variant_idx]
@@ -647,6 +661,13 @@ async def calculate_optimal_route(
                 "coverage_percent": (len(navigable_vertices) / len(vertices) * 100),
                 "valid_weather_points": len(verified_weather_data),
                 "total_weather_points": len(weather_points)
+            },
+            "difficulty": {
+                "overall_score": difficulty_result["overall_score"],
+                "level": difficulty_result["overall"].get_level().value,
+                "best_variant_score": round(difficulty_result["best_variant"].calculate_total(), 2),
+                "worst_variant_score": round(difficulty_result["worst_variant"].calculate_total(), 2),
+                "breakdown": difficulty_result["overall"].to_dict()["breakdown"]
             }
         }
 
@@ -745,6 +766,73 @@ async def get_calculated_route(
         "data": route_data
     }
 
+
+
+@router.get("/{meshed_area_id}/difficulty", status_code=200)
+async def get_route_difficulty(
+        meshed_area_id: UUID4,
+        include_breakdown: bool = Query(True, description="Include detailed breakdown"),
+        session: AsyncSession = Depends(get_async_session)
+):
+    """Get difficulty analysis for calculated route variants."""
+
+    query = (
+        select(RouteVariant)
+        .where(RouteVariant.meshed_area_id == meshed_area_id)
+        .order_by(RouteVariant.variant_order)
+    )
+    result = await session.execute(query)
+    variants = result.scalars().all()
+
+    if not variants:
+        raise HTTPException(404, "No variants found. Calculate routes first.")
+
+    variants_data = []
+    for v in variants:
+        segments = json.loads(v.segments_json) if v.segments_json else []
+        variants_data.append({
+            "segments": segments,
+            "tacks_count": v.tacks_count or 0,
+            "jibes_count": v.jibes_count or 0,
+            "total_distance_nm": v.total_distance_nm or 0,
+            "total_time_hours": v.total_time_hours or 0,
+            "departure_time": v.departure_time
+        })
+
+    calculator = RouteDifficultyCalculator()
+    difficulty_result = calculator.calculate_for_variants(variants_data)
+
+    response = {
+        "meshed_area_id": str(meshed_area_id),
+        "overall_score": difficulty_result["overall_score"],
+        "level": difficulty_result["overall"].get_level().value,
+        "best_variant": {
+            "idx": difficulty_result["best_variant_idx"],
+            "score": round(difficulty_result["best_variant"].calculate_total(), 2),
+            "level": difficulty_result["best_variant"].get_level().value
+        },
+        "worst_variant": {
+            "idx": difficulty_result["worst_variant_idx"],
+            "score": round(difficulty_result["worst_variant"].calculate_total(), 2),
+            "level": difficulty_result["worst_variant"].get_level().value
+        },
+        "variants": [
+            {
+                "variant_order": i,
+                "score": round(f.calculate_total(), 2),
+                "level": f.get_level().value
+            }
+            for i, f in enumerate(difficulty_result["variants"])
+        ]
+    }
+
+    if include_breakdown:
+        response["breakdown"] = difficulty_result["overall"].to_dict()["breakdown"]
+        response["variants_breakdown"] = [
+            f.to_dict() for f in difficulty_result["variants"]
+        ]
+
+    return response
 
 def _get_point_of_sail(twa: float) -> str:
     twa = abs(twa)
