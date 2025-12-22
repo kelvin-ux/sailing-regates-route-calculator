@@ -2,15 +2,26 @@ from __future__ import annotations
 
 import numpy as np
 import math
+import heapq
 from typing import Tuple
 from typing import Dict
 from typing import List
 from typing import Optional
+from dataclasses import dataclass
 
 from scipy.spatial import KDTree
 
 from app.models.models import Yacht
 from app.schemas.SailingConditions import SailingConditions
+
+
+@dataclass
+class AStarResult:
+    path: List[Tuple[float, float]]
+    path_indices: List[int]
+    g_scores: Dict[int, float]  # Koszt dojścia do każdego węzła
+    f_scores: Dict[int, float]  # g + heurystyka dla każdego węzła
+    total_cost: float
 
 
 class SailingHeuristics:
@@ -41,7 +52,7 @@ class SailingHeuristics:
         # Sailing constants - use yacht-specific times if available
         self.TACKING_PENALTY = (yacht.tack_time * 60.0) if yacht.tack_time else 120.0
         self.GYBING_PENALTY = (yacht.jibe_time * 60.0) if yacht.jibe_time else 90.0
-        self.DEAD_ANGLE = 30.0  # Reduced from 30 to be less restrictive
+        self.DEAD_ANGLE = 30.0
         self.COMFORT_WAVE_HEIGHT = 4.0
         self.MAX_HEEL_ANGLE = 40.0
 
@@ -60,35 +71,27 @@ class SailingHeuristics:
         Calculate cost of sailing from one vertex to another.
         Returns cost in seconds (estimated time).
         """
-        # Get weather conditions at both vertices
         from_conditions = self._get_conditions_at_vertex(from_idx)
         to_conditions = self._get_conditions_at_vertex(to_idx)
 
-        # Calculate bearing and distance
         bearing = self._calculate_bearing(from_vertex, to_vertex)
         distance = self._calculate_distance(from_vertex, to_vertex)
 
-        # Calculate True Wind Angles
         from_twa = self._calculate_twa(
             previous_heading if previous_heading is not None else bearing,
             from_conditions.wind_direction
         )
         to_twa = self._calculate_twa(bearing, to_conditions.wind_direction)
 
-        # Check if we're trying to sail into no-go zone (upwind)
         if abs(to_twa) < self.DEAD_ANGLE:
-            return float('inf')  # Can't sail directly upwind
+            return float('inf')
 
-        # Average conditions for the segment
-        # IMPORTANT: Convert wind speed from knots to m/s for boat speed calculation
         avg_wind_speed_knots = (from_conditions.wind_speed + to_conditions.wind_speed) / 2.0
-        avg_wind_speed_ms = avg_wind_speed_knots * 0.514444  # knots to m/s
+        avg_wind_speed_ms = avg_wind_speed_knots * 0.514444
         avg_wave_height = (from_conditions.wave_height + to_conditions.wave_height) / 2.0
 
-        # Get boat speed from polar data (expects wind in m/s)
         boat_speed = self._get_boat_speed(avg_wind_speed_ms, abs(to_twa))
 
-        # Apply current effect (convert current from knots to m/s)
         current_velocity_ms = to_conditions.current_velocity * 0.514444
         boat_speed = self._apply_current_effect(
             boat_speed,
@@ -97,7 +100,6 @@ class SailingHeuristics:
             to_conditions.current_direction
         )
 
-        # Apply wave penalty
         wave_penalty = self._calculate_wave_penalty(
             avg_wave_height,
             to_conditions.wave_direction,
@@ -105,28 +107,23 @@ class SailingHeuristics:
         )
         boat_speed *= (1.0 - wave_penalty)
 
-        # Ensure minimum speed for numerical stability
-        boat_speed = max(boat_speed, 0.5)  # Minimum 0.5 m/s
+        boat_speed = max(boat_speed, 0.5)
 
-        # Calculate base time
         time_cost = distance / boat_speed
 
-        # Add maneuver penalties if we have previous heading
         if previous_heading is not None:
             maneuver_penalty = self._calculate_maneuver_penalty(
                 previous_heading, bearing, from_twa, to_twa
             )
             time_cost += maneuver_penalty
 
-        # Add comfort penalty for rough conditions
         comfort_penalty = self._calculate_comfort_penalty(to_conditions)
         time_cost *= (1.0 + comfort_penalty)
 
-
         if boat_speed <= 0.01:
             return float("inf")
-        # Add crew fatigue factor for very long segments
-        if distance > 10000:  # More than 10km
+
+        if distance > 10000:
             fatigue_factor = 1.0 + (distance - 10000) / 50000
             time_cost *= fatigue_factor
 
@@ -142,19 +139,16 @@ class SailingHeuristics:
         """
         distance = self._calculate_distance(current, goal)
 
-        # Get average conditions
         conditions = self._get_conditions_at_vertex(current_idx)
 
-        # Optimistic estimate based on conditions
         if self.yacht.max_speed:
-            optimistic_speed = self.yacht.max_speed * 0.514444  # knots to m/s
+            optimistic_speed = self.yacht.max_speed * 0.514444
         else:
-            optimistic_speed = 5.0  # Default 5 m/s
+            optimistic_speed = 5.0
 
-        # Adjust for wind conditions (wind is in knots)
-        if conditions.wind_speed < 5.0:  # Light wind (knots)
+        if conditions.wind_speed < 5.0:
             optimistic_speed *= 0.5
-        elif conditions.wind_speed > 25.0:  # Strong wind (knots)
+        elif conditions.wind_speed > 25.0:
             optimistic_speed *= 0.8
 
         return distance / optimistic_speed
@@ -166,14 +160,13 @@ class SailingHeuristics:
         if weather_idx is not None and weather_idx in self.weather_data:
             return SailingConditions.from_weather_data(self.weather_data[weather_idx])
 
-        # Default conditions if no weather data
         return SailingConditions(
-            wind_speed=10.0,  # knots
+            wind_speed=10.0,
             wind_direction=0.0,
             wave_height=1.0,
             wave_direction=0.0,
             wave_period=5.0,
-            current_velocity=0.5,  # knots
+            current_velocity=0.5,
             current_direction=0.0
         )
 
@@ -201,7 +194,6 @@ class SailingHeuristics:
         wind_from = wind_direction
         twa = heading - wind_from
 
-        # Normalize to -180 to 180
         while twa > 180:
             twa -= 360
         while twa < -180:
@@ -212,22 +204,13 @@ class SailingHeuristics:
     def _get_boat_speed(self, wind_speed_ms: float, twa: float) -> float:
         """
         Get boat speed from polar data for given wind conditions.
-        Args:
-            wind_speed_ms: Wind speed in m/s
-            twa: True Wind Angle in degrees
-        Returns:
-            Boat speed in m/s
         """
         if not self.yacht.polar_data:
             return self._simple_polar_model(wind_speed_ms, twa)
 
-        # Use actual polar data interpolation
         polar = self.yacht.polar_data
-
-        # Ensure TWA is positive (0-180)
         twa = abs(twa)
 
-        # Get polar arrays
         twa_angles = polar.get('twa_angles', [])
         wind_speeds = polar.get('wind_speeds', [])
         boat_speeds = polar.get('boat_speeds', [])
@@ -235,10 +218,8 @@ class SailingHeuristics:
         if not all([twa_angles, wind_speeds, boat_speeds]):
             return self._simple_polar_model(wind_speed_ms, twa)
 
-        # Convert wind speed to knots for polar lookup
         wind_speed_knots = wind_speed_ms / 0.514444
 
-        # Find interpolation indices
         twa_idx_low, twa_idx_high, twa_factor = self._find_interpolation_indices(
             twa, twa_angles
         )
@@ -247,7 +228,6 @@ class SailingHeuristics:
         )
 
         try:
-            # Bilinear interpolation
             speed_ll = boat_speeds[twa_idx_low][ws_idx_low]
             speed_lh = boat_speeds[twa_idx_low][ws_idx_high]
             speed_hl = boat_speeds[twa_idx_high][ws_idx_low]
@@ -257,26 +237,17 @@ class SailingHeuristics:
             speed_h = speed_hl + (speed_hh - speed_hl) * ws_factor
             boat_speed_knots = speed_l + (speed_h - speed_l) * twa_factor
 
-            # Convert knots to m/s
             return boat_speed_knots * 0.514444
 
         except (IndexError, TypeError):
             return self._simple_polar_model(wind_speed_ms, twa)
 
     def _simple_polar_model(self, wind_speed_ms: float, twa: float) -> float:
-        """
-        Simple polar performance model when no data available.
-        Args:
-            wind_speed_ms: Wind speed in m/s
-            twa: True Wind Angle in degrees
-        Returns:
-            Boat speed in m/s
-        """
+        """Simple polar performance model when no data available."""
         twa = abs(twa)
 
-        # Base speed as fraction of wind speed
         if twa < 25:
-            speed_factor = 0.0  # Can't sail too close to wind
+            speed_factor = 0.0
         elif twa < 45:
             speed_factor = 0.3
         elif twa < 60:
@@ -288,34 +259,28 @@ class SailingHeuristics:
         elif twa < 150:
             speed_factor = 0.65
         elif twa < 170:
-            speed_factor = 0.55  # Slower downwind
+            speed_factor = 0.55
         else:
-            speed_factor = 0.5  # Dead downwind
+            speed_factor = 0.5
 
-        # Apply wind speed limits
         wind_knots = wind_speed_ms / 0.514444
-        if wind_knots < 5.0:  # Very light wind
+        if wind_knots < 5.0:
             speed_factor *= 0.3
-        elif wind_knots > 25.0:  # Strong wind
+        elif wind_knots > 25.0:
             speed_factor *= 0.8
 
         boat_speed = wind_speed_ms * speed_factor
 
-        # Cap at max speed if available
         if self.yacht.max_speed:
             max_speed_ms = self.yacht.max_speed * 0.514444
             boat_speed = min(boat_speed, max_speed_ms)
 
-        # Ensure minimum speed
-        boat_speed = max(boat_speed, 0.5)  # At least 0.5 m/s
+        boat_speed = max(boat_speed, 0.5)
 
         return boat_speed
 
     def _find_interpolation_indices(self, value: float, array: List[float]) -> Tuple[int, int, float]:
-        """
-        Find interpolation indices and factor for a value in an array.
-        Returns (low_idx, high_idx, interpolation_factor)
-        """
+        """Find interpolation indices and factor for a value in an array."""
         if not array:
             return 0, 0, 0.0
 
@@ -336,112 +301,85 @@ class SailingHeuristics:
 
     def _apply_current_effect(self, boat_speed: float, heading: float,
                               current_velocity: float, current_direction: float) -> float:
-        """
-        Apply ocean current effect on boat speed.
-        Returns adjusted speed over ground.
-        """
+        """Apply ocean current effect on boat speed."""
         if current_velocity < 0.1:
             return boat_speed
 
-        # Convert to vectors
         boat_vx = boat_speed * math.sin(math.radians(heading))
         boat_vy = boat_speed * math.cos(math.radians(heading))
 
         current_vx = current_velocity * math.sin(math.radians(current_direction))
         current_vy = current_velocity * math.cos(math.radians(current_direction))
 
-        # Add vectors
         total_vx = boat_vx + current_vx
         total_vy = boat_vy + current_vy
 
-        # Calculate resultant speed
         speed_over_ground = math.sqrt(total_vx ** 2 + total_vy ** 2)
 
         return speed_over_ground
 
     def _calculate_wave_penalty(self, wave_height: float, wave_direction: float,
                                 heading: float) -> float:
-        """
-        Calculate speed reduction due to waves.
-        Returns penalty factor (0.0 to 0.5).
-        """
+        """Calculate speed reduction due to waves."""
         if wave_height < 0.5:
             return 0.0
 
-        # Size factor - larger yachts are less affected by waves
         size_factor = 1.0 - min(self.yacht_length_m / 50.0, 0.5)
 
-        # Wave angle relative to boat
         wave_angle = abs(heading - wave_direction)
         if wave_angle > 180:
             wave_angle = 360 - wave_angle
 
-        # Angle factor
-        if wave_angle < 30:  # Head seas
+        if wave_angle < 30:
             angle_factor = 1.0
         elif wave_angle < 60:
             angle_factor = 0.8
-        elif wave_angle < 120:  # Beam seas
+        elif wave_angle < 120:
             angle_factor = 1.2
         elif wave_angle < 150:
             angle_factor = 0.6
-        else:  # Following seas
+        else:
             angle_factor = 0.3
 
-        # Height factor
         relative_wave_height = wave_height / self.yacht_length_m
         height_factor = min(relative_wave_height * 3.0, 1.0)
 
         penalty = height_factor * angle_factor * size_factor * 0.4
-        return min(penalty, 0.5)  # Max 50% speed reduction
+        return min(penalty, 0.5)
 
     def _calculate_maneuver_penalty(self, from_heading: float, to_heading: float,
                                     from_twa: float, to_twa: float) -> float:
-        """
-        Calculate time penalty for required maneuvers.
-        Returns penalty in seconds.
-        """
-        # Calculate heading change
+        """Calculate time penalty for required maneuvers."""
         heading_change = abs(to_heading - from_heading)
         if heading_change > 180:
             heading_change = 360 - heading_change
 
         penalty = 0.0
 
-        # Tacking: going through the wind (upwind, TWA < 90)
         if abs(from_twa) < 90 and abs(to_twa) < 90:
-            # Check if we're changing sides relative to wind
-            if (from_twa * to_twa) < 0:  # Different signs = crossing through wind
+            if (from_twa * to_twa) < 0:
                 penalty = self.TACKING_PENALTY
 
-        # Gybing: going through downwind (TWA > 120)
         elif abs(from_twa) > 120 and abs(to_twa) > 120:
-            # Check if we're changing sides downwind
-            if (from_twa * to_twa) < 0:  # Different signs = gybing
+            if (from_twa * to_twa) < 0:
                 penalty = self.GYBING_PENALTY
 
-        # Additional penalty for large heading changes
         if heading_change > 60:
-            penalty += 10.0  # 10 seconds for major course change
+            penalty += 10.0
 
         return penalty
 
     def _calculate_comfort_penalty(self, conditions: SailingConditions) -> float:
-        """
-        Calculate penalty for uncomfortable conditions.
-        Returns penalty factor (0.0 to 0.5).
-        """
+        """Calculate penalty for uncomfortable conditions."""
         penalty = 0.0
 
-        # Wave height discomfort
         relative_wave_discomfort = conditions.wave_height / self.yacht_length_m
         if relative_wave_discomfort > 0.1:
             wave_penalty = (relative_wave_discomfort - 0.1) * 2.0
             penalty += min(wave_penalty, 0.3)
 
-        # Strong wind discomfort (wind is in knots)
         if self.yacht.max_wind_speed:
-            wind_ms = self.yacht.max_wind_speed  # Already in m/s
+            wind_ms = self.yacht.max_wind_speed
             wind_knots = wind_ms / 0.514444
             if conditions.wind_speed > wind_knots:
                 penalty += 0.5
@@ -449,23 +387,20 @@ class SailingHeuristics:
                 wind_penalty = (conditions.wind_speed - wind_knots * 0.8) / (wind_knots * 0.2)
                 penalty += min(wind_penalty * 0.3, 0.3)
         else:
-            # Default wind limits if not specified
-            if conditions.wind_speed > 30.0:  # Over 30 knots
+            if conditions.wind_speed > 30.0:
                 wind_penalty = (conditions.wind_speed - 30.0) / 20.0
                 penalty += min(wind_penalty, 0.3)
 
-        # Light wind frustration
-        if conditions.wind_speed < 5.0:  # Less than 5 knots
+        if conditions.wind_speed < 5.0:
             light_penalty = (5.0 - conditions.wind_speed) / 5.0
             size_adjustment = min(self.yacht_length_m / 30.0, 1.5)
             penalty += min(light_penalty * size_adjustment * 0.3, 0.2)
 
-        # Crew fatigue factor
         if self.yacht.amount_of_crew:
             crew_factor = 1.0 / max(self.yacht.amount_of_crew, 1)
             penalty *= (1.0 + crew_factor * 0.2)
 
-        return min(penalty, 0.5)  # Max 50% penalty
+        return min(penalty, 0.5)
 
 
 class SailingRouter:
@@ -477,37 +412,30 @@ class SailingRouter:
                  navigation_mesh: Dict,
                  weather_data: Dict,
                  yacht: Yacht,
-                 heuristics_cls = SailingHeuristics):
-        """
-        Initialize router with mesh, weather, and yacht data.
-        """
+                 heuristics_cls=SailingHeuristics):
+        """Initialize router with mesh, weather, and yacht data."""
         self.vertices = np.array(navigation_mesh['vertices'])
         self.triangles = np.array(navigation_mesh['triangles'])
         self.weather_data = weather_data
         self.yacht = yacht
         self.heuristics_cls = heuristics_cls
 
-        # Build navigation graph from triangles
         self.graph = self._build_navigation_graph()
-
-        # Create KDTree for nearest vertex queries
         self.vertex_tree = KDTree(self.vertices)
 
+        # Przechowuj ostatnie wyniki A*
+        self.last_result: Optional[AStarResult] = None
+
     def _build_navigation_graph(self) -> Dict[int, List[int]]:
-        """
-        Build adjacency graph from triangle mesh.
-        Returns dict: vertex_idx -> list of connected vertex indices
-        """
+        """Build adjacency graph from triangle mesh."""
         graph = {i: set() for i in range(len(self.vertices))}
 
         for triangle in self.triangles:
-            # Connect all vertices in triangle
             for i in range(3):
                 for j in range(3):
                     if i != j:
                         graph[triangle[i]].add(triangle[j])
 
-        # Convert sets to lists
         return {k: list(v) for k, v in graph.items()}
 
     def find_nearest_vertex(self, point: Tuple[float, float]) -> int:
@@ -523,23 +451,21 @@ class SailingRouter:
         Find optimal sailing route using A* with sailing heuristics.
         Returns list of (x, y) waypoints.
         """
-        # Initialize heuristics
         heuristics = self.heuristics_cls(self.yacht, weather_mapping, self.weather_data)
 
-        # Find nearest vertices
         start_idx = self.find_nearest_vertex(start)
         goal_idx = self.find_nearest_vertex(goal)
 
-        # Run A* algorithm
-        path_indices = self._astar(start_idx, goal_idx, heuristics)
+        result = self._astar_with_scores(start_idx, goal_idx, heuristics)
 
-        if not path_indices:
+        if result is None:
+            self.last_result = None
             return []
 
-        # Convert to coordinates
-        path = [tuple(self.vertices[idx]) for idx in path_indices]
+        self.last_result = result
 
-        # Add original start and goal if different from nearest vertices
+        path = [tuple(self.vertices[idx]) for idx in result.path_indices]
+
         if self._calculate_distance(start, path[0]) > 10:
             path.insert(0, start)
         if self._calculate_distance(goal, path[-1]) > 10:
@@ -547,18 +473,37 @@ class SailingRouter:
 
         return path
 
-    def _astar(self, start_idx: int, goal_idx: int,
-               heuristics: SailingHeuristics) -> List[int]:
+    def find_optimal_route_with_scores(self,
+                                       start: Tuple[float, float],
+                                       goal: Tuple[float, float],
+                                       weather_mapping: Dict[int, List[int]]) -> Optional[AStarResult]:
         """
-        A* pathfinding with sailing-specific heuristics.
-        Returns list of vertex indices forming the path.
+        Find optimal route and return full result with scores.
+        Use this when you need heuristic scores for storage.
         """
-        import heapq
+        path = self.find_optimal_route(start, goal, weather_mapping)
 
-        # Priority queue: (f_score, vertex_idx)
+        if not path:
+            return None
+
+        if self.last_result:
+            return AStarResult(
+                path=path,
+                path_indices=self.last_result.path_indices,
+                g_scores=self.last_result.g_scores,
+                f_scores=self.last_result.f_scores,
+                total_cost=self.last_result.total_cost
+            )
+
+        return None
+
+    def _astar_with_scores(self, start_idx: int, goal_idx: int,
+                           heuristics: SailingHeuristics) -> Optional[AStarResult]:
+        """
+        A* pathfinding that returns scores along with path.
+        """
         open_set = [(0, start_idx)]
 
-        # Maps for tracking
         came_from = {}
         g_score = {start_idx: 0}
         f_score = {start_idx: heuristics.calculate_heuristic_cost(
@@ -571,26 +516,36 @@ class SailingRouter:
 
         while open_set:
             current_f, current = heapq.heappop(open_set)
+
             if current == goal_idx:
                 # Reconstruct path
-                path = []
-                while current in came_from:
-                    path.append(current)
-                    current = came_from[current]
-                path.append(start_idx)
-                return list(reversed(path))
+                path_indices = []
+                node = current
+                while node in came_from:
+                    path_indices.append(node)
+                    node = came_from[node]
+                path_indices.append(start_idx)
+                path_indices = list(reversed(path_indices))
+
+                path = [tuple(self.vertices[idx]) for idx in path_indices]
+
+                return AStarResult(
+                    path=path,
+                    path_indices=path_indices,
+                    g_scores=dict(g_score),
+                    f_scores=dict(f_score),
+                    total_cost=g_score[goal_idx]
+                )
 
             if current in closed_set:
                 continue
 
             closed_set.add(current)
 
-            # Check all neighbors
             for neighbor in self.graph.get(current, []):
                 if neighbor in closed_set:
                     continue
 
-                # Calculate tentative g score
                 previous_heading = None
                 if current in came_from:
                     prev_idx = came_from[current]
@@ -613,7 +568,6 @@ class SailingRouter:
                 tentative_g = g_score[current] + edge_cost
 
                 if neighbor not in g_score or tentative_g < g_score[neighbor]:
-                    # This path is better
                     came_from[neighbor] = current
                     g_score[neighbor] = tentative_g
 
@@ -626,8 +580,13 @@ class SailingRouter:
                     f_score[neighbor] = tentative_g + h_score
                     heapq.heappush(open_set, (f_score[neighbor], neighbor))
 
-        # No path found
-        return []
+        return None
+
+    def _astar(self, start_idx: int, goal_idx: int,
+               heuristics: SailingHeuristics) -> List[int]:
+        """Legacy method for backward compatibility."""
+        result = self._astar_with_scores(start_idx, goal_idx, heuristics)
+        return result.path_indices if result else []
 
     def _calculate_distance(self, p1: Tuple[float, float],
                             p2: Tuple[float, float]) -> float:

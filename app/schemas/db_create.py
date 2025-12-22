@@ -13,6 +13,12 @@ class RoutePointType(str, Enum):
     STOP = "stop"
 
 
+class ControlPointType(str, Enum):
+    BUOY = "Buoy"
+    GATE = "gate"
+    NATURAL = "natural"
+
+
 class RouteCreate(BaseModel):
     user_id: UUID4
     yacht_id: UUID4
@@ -27,12 +33,25 @@ class RoutePointCreate(BaseModel):
     seq_idx: int
     x: float  # lon
     y: float  # lat
+    timestamp: Optional[datetime] = None
+    heuristic_score: Optional[float] = None
+
+
+class ControlPointCreate(BaseModel):
+    route_id: UUID4
+    name: str
+    x: float  # lon
+    y: float  # lat
+    x2: Optional[float] = None
+    y2: Optional[float] = None
+    width: Optional[float] = None
+    type: ControlPointType = ControlPointType.BUOY
+    desc: Optional[str] = None
 
 
 class WeatherForecastCreate(BaseModel):
     route_point_id: UUID4
     forecast_timestamp: datetime
-
     temperature: Optional[float] = None
     humidity: Optional[float] = None
     pressure: Optional[float] = None

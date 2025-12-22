@@ -37,6 +37,7 @@ from app.services.db.services import RouteVariantService
 from app.services.routing.heuristics import SafeHeuristics
 from app.services.routing.heuristics import SailingHeuristics
 from app.services.routing.heuristics import SailingRouter
+from app.services.routing.heurystic_storage import save_path_heuristics
 from app.services.routing.segement_optimalizer import SegmentOptimizer
 from app.services.weather.validator import WeatherDataValidator
 from app.services.weather.weather_api_manager import OpenMeteoService
@@ -210,11 +211,12 @@ async def _calculate_single_route(
     router_instance = SailingRouter(navigation_mesh, verified_weather_data, yacht)
     heuristics = SailingHeuristics(yacht, weather_mapping, verified_weather_data)
 
-    optimal_path = router_instance.find_optimal_route(
+    route_result = router_instance.find_optimal_route_with_scores(
         start=start_xy,
         goal=stop_xy,
         weather_mapping=weather_mapping
     )
+    optimal_path = route_result.path if route_result else None
 
     if not optimal_path:
         safe_router = SailingRouter(
@@ -226,11 +228,12 @@ async def _calculate_single_route(
             )
         )
 
-        optimal_path = safe_router.find_optimal_route(
+        route_result = safe_router.find_optimal_route_with_scores(
             start=start_xy,
             goal=stop_xy,
             weather_mapping=weather_mapping
         )
+        optimal_path = route_result.path if route_result else None
 
         if not optimal_path:
             print(f"No path found for departure {departure_time}")
@@ -321,6 +324,26 @@ async def _calculate_single_route(
 
     if len(segments) == 0:
         return None
+
+    if route_result and route_result.f_scores:
+        transformer_back = Transformer.from_crs(meshed.crs_epsg, 4326, always_xy=True)
+        path_data = []
+        for i, idx in enumerate(route_result.path_indices):
+            x, y = vertices[idx]
+            lon, lat = transformer_back.transform(x, y)
+            path_data.append({
+                "x": lon,
+                "y": lat,
+                "seq_idx": 5000 + i,
+                "heuristic_score": route_result.f_scores.get(idx, 0.0)
+            })
+
+        await save_path_heuristics(
+            session,
+            meshed.route_id,
+            meshed.id,
+            path_data
+        )
 
     avg_wind_speed = total_wind_speed / valid_weather_count if valid_weather_count > 0 else 0.0
     avg_wind_direction = total_wind_direction / valid_weather_count if valid_weather_count > 0 else 0.0
@@ -592,7 +615,6 @@ async def calculate_optimal_route(
                 "num_variants": len(variants_results)
             }
         }
-
         stmt = (
             update(MeshedArea)
             .where(MeshedArea.id == meshed_area_id)

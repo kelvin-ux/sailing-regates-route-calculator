@@ -19,14 +19,14 @@ from sklearn.cluster import KMeans
 from scipy.spatial import KDTree
 
 from app.schemas.mesh import CreateRouteAndMeshIn
-from app.schemas.db_create import RouteCreate
+from app.schemas.db_create import RouteCreate, ControlPointCreate, ControlPointType
 from app.schemas.db_create import RoutePointCreate
 from app.schemas.db_create import MeshedAreaCreate
 from app.schemas.WeatherMeshConfig import WeatherMeshConfig
 
 from app.models.models import RoutePointType
 
-from app.services.db.services import MeshedAreaService, YachtService
+from app.services.db.services import MeshedAreaService, YachtService, ControlPointService
 from app.services.db.services import RoutePointService
 from app.services.db.services import RouteService
 from app.services.geodata.corridor import _to_proj
@@ -177,6 +177,7 @@ async def create_route_and_mesh(session: AsyncSession, payload: CreateRouteAndMe
     rpoint_svc = RoutePointService(session)
     mesh_svc = MeshedAreaService(session)
     yacht_svc = YachtService(session)
+    ctrl_point_svc = ControlPointService(session)
 
     if await yacht_svc.get_entity_by_id(payload.yacht_id) is None:
         raise ValueError("Provide valid yacht id")
@@ -193,10 +194,13 @@ async def create_route_and_mesh(session: AsyncSession, payload: CreateRouteAndMe
     for i, p in enumerate(payload.points):
         if i == 0:
             pt = RoutePointType.START
+            cp_name = "START"
         elif i == last_idx:
             pt = RoutePointType.STOP
+            cp_name = "FINISH"
         else:
             pt = RoutePointType.CONTROL
+            cp_name = p.name if hasattr(p, 'name') and p.name else f"CP{i}"
 
         await rpoint_svc.create_entity(
             model_data=RoutePointCreate(
@@ -204,7 +208,17 @@ async def create_route_and_mesh(session: AsyncSession, payload: CreateRouteAndMe
                 point_type=pt,
                 seq_idx=i,
                 x=p.lon,
-                y=p.lat
+                y=p.lat,
+                timestamp=p.timestamp
+            )
+        )
+        await ctrl_point_svc.create_entity(
+            model_data=ControlPointCreate(
+                route_id=route.id,
+                name=cp_name,
+                x=p.lon,
+                y=p.lat,
+                type = ControlPointType.BUOY
             )
         )
 

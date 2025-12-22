@@ -7,6 +7,7 @@ from app.models.models import Yacht
 from app.models.models import RouteVariant
 from app.services.common import BaseService
 from app.models.models import RouteSegments
+from app.models.models import ControlPoint
 
 class RouteService(BaseService[Route]):
     def __init__(self, session: AsyncSession): super().__init__(session, Route)
@@ -28,3 +29,6 @@ class RouteSegmentsService(BaseService[RouteSegments]):
 
 class RouteVariantService(BaseService[RouteVariant]):
     def __init__(self, session: AsyncSession): super().__init__(session, RouteVariant)
+
+class ControlPointService(BaseService[ControlPoint]):
+    def __init__(self, session: AsyncSession): super().__init__(session, ControlPoint)

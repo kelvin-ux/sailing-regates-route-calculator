@@ -54,13 +54,6 @@ class YachtType(enum.StrEnum):
     TRIMARAN = "trimaran"
     OPEN_60 = "open_60"
 
-
-class ObstacleType(enum.StrEnum):
-    NATURAL = "Natural"
-    NAVIGATIONAL_MARK = "Navigational_mark"
-    OTHER = "Other"
-
-
 class ControlPointType(enum.StrEnum):
     BUOY = "Buoy"
     GATE = "gate"
@@ -72,15 +65,6 @@ class RoutePointType(enum.StrEnum):
     CONTROL = "control"
     START = "start"
     STOP = "stop"
-
-
-route_obstacles_association = Table(
-    "route_obstacles",
-    Base.metadata,
-    Column("route_id", ForeignKey("route.id"), primary_key=True, index=True),
-    Column("obstacle_id", ForeignKey("obstacle.id"), primary_key=True, index=True),
-    Column("impact_level", Float, nullable=True, comment="How much the obstacle affects the route (0.0-1.0)")
-)
 
 class Yacht(Base):
     __tablename__ = "yacht"
@@ -104,25 +88,6 @@ class Yacht(Base):
 
     routes: Mapped[List["Route"]] = relationship("Route", back_populates="yacht")
 
-
-class Obstacle(Base):
-    __tablename__ = "obstacle"
-
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), default=uuid4, primary_key=True)
-    type: Mapped[ObstacleType] = mapped_column(Enum(ObstacleType), nullable=False)
-    desc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    directions: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="Navigation directions")
-    is_permanent: Mapped[bool] = mapped_column(Boolean, default=True)
-    valid_from: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    valid_to: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-
-    routes: Mapped[List["Route"]] = relationship(
-        "Route",
-        secondary=route_obstacles_association,
-        back_populates="obstacles"
-    )
-
-
 class Route(Base):
     __tablename__ = "route"
 
@@ -139,11 +104,6 @@ class Route(Base):
     route_points: Mapped[List["RoutePoint"]] = relationship("RoutePoint", back_populates="route")
     control_points_rel: Mapped[List["ControlPoint"]] = relationship("ControlPoint", back_populates="route")
     route_segments: Mapped[List["RouteSegments"]] = relationship("RouteSegments", back_populates="route")
-    obstacles: Mapped[List["Obstacle"]] = relationship(
-        "Obstacle",
-        secondary=route_obstacles_association,
-        back_populates="routes"
-    )
     meshed_areas: Mapped[List["MeshedArea"]] = relationship("MeshedArea", back_populates="route")
 
 
@@ -294,35 +254,22 @@ class RouteVariant(Base):
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     meshed_area_id: Mapped[UUID] = mapped_column(ForeignKey("meshed_area.id"), nullable=False)
-
     departure_time: Mapped[datetime] = mapped_column(DateTime, nullable=False,
                                                      comment="Planned departure time for this variant")
     variant_order: Mapped[int] = mapped_column(Integer, nullable=False, comment="Order in time window (0, 1, 2...)")
-
-    # Route data
     waypoints_json: Mapped[str] = mapped_column(Text, nullable=False, comment="[[lon,lat],...] waypoints in WGS84")
     segments_json: Mapped[str] = mapped_column(Text, nullable=False, comment="Segment details as JSON")
-
-    # Summary stats
     total_time_hours: Mapped[float] = mapped_column(Float, nullable=False)
     total_distance_nm: Mapped[float] = mapped_column(Float, nullable=False)
     average_speed_knots: Mapped[float] = mapped_column(Float, nullable=False)
-
-    # Weather conditions summary
     avg_wind_speed: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="Average wind speed in knots")
     avg_wind_direction: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     avg_wave_height: Mapped[Optional[float]] = mapped_column(Float, nullable=True,
                                                              comment="Average wave height in meters")
-
-    # Maneuver counts
     tacks_count: Mapped[int] = mapped_column(Integer, default=0)
     jibes_count: Mapped[int] = mapped_column(Integer, default=0)
-
-    # Flags
     is_best: Mapped[bool] = mapped_column(Boolean, default=False, comment="Whether this is the recommended variant")
     is_selected: Mapped[bool] = mapped_column(Boolean, default=False, comment="User-selected for display")
-
-    # Relationships
     meshed_area: Mapped["MeshedArea"] = relationship("MeshedArea", back_populates="route_variants")
 
 
