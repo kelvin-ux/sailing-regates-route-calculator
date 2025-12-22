@@ -202,16 +202,6 @@ async def create_route_and_mesh(session: AsyncSession, payload: CreateRouteAndMe
             pt = RoutePointType.CONTROL
             cp_name = p.name if hasattr(p, 'name') and p.name else f"CP{i}"
 
-        await rpoint_svc.create_entity(
-            model_data=RoutePointCreate(
-                route_id=route.id,
-                point_type=pt,
-                seq_idx=i,
-                x=p.lon,
-                y=p.lat,
-                timestamp=p.timestamp
-            )
-        )
         await ctrl_point_svc.create_entity(
             model_data=ControlPointCreate(
                 route_id=route.id,
@@ -266,45 +256,6 @@ async def create_route_and_mesh(session: AsyncSession, payload: CreateRouteAndMe
             route_xy = safe_line
             corridor_xy = route_xy.buffer(buffer_m, cap_style=2, join_style=2)
 
-    route_ll = _to_proj(route_xy, local_crs, CRS.from_epsg(4326))
-    coords_ll = list(route_ll.coords)
-
-    base = len(payload.points)
-    seq = base
-
-    for j in range(1, max(0, len(coords_ll) - 1)):
-        lon, lat = coords_ll[j][0], coords_ll[j][1]
-        await rpoint_svc.create_entity(
-            model_data=RoutePointCreate(
-                route_id=route.id,
-                point_type=RoutePointType.NAVIGATION,
-                seq_idx=seq,
-                x=lon,
-                y=lat
-            )
-        )
-        seq += 1
-
-
-    STEP_M = 300.0
-    L = float(route_xy.length)
-
-    d = STEP_M
-    while d < L - STEP_M * 0.5:
-        pt_xy = route_xy.interpolate(d)
-        pt_ll = _to_proj(Point(pt_xy.x, pt_xy.y),
-                         local_crs, CRS.from_epsg(4326))
-        await rpoint_svc.create_entity(
-            model_data=RoutePointCreate(
-                route_id=route.id,
-                point_type=RoutePointType.NAVIGATION,
-                seq_idx=seq,
-                x=float(pt_ll.x),  # lon
-                y=float(pt_ll.y)  # lat
-            )
-        )
-        seq += 1
-        d += STEP_M
 
     nav_zones = MeshZones(
         radii_m=[payload.ring1_m, payload.ring2_m, payload.ring3_m],
@@ -365,6 +316,48 @@ async def create_route_and_mesh(session: AsyncSession, payload: CreateRouteAndMe
             weather_points_json=json.dumps(weather_points_metadata)
         )
     )
+
+    for i, p in enumerate(payload.points):
+        if i == 0:
+            pt = RoutePointType.START
+        elif i == last_idx:
+            pt = RoutePointType.STOP
+        else:
+            pt = RoutePointType.CONTROL
+
+        await rpoint_svc.create_entity(
+            model_data=RoutePointCreate(
+                route_id=route.id,
+                meshed_area_id=meshed.id,
+                point_type=pt,
+                seq_idx=i,
+                x=p.lon,
+                y=p.lat,
+                timestamp=p.timestamp
+            )
+        )
+
+    seq = len(payload.points)
+    STEP_M = 300.0
+    L = float(route_xy.length)
+
+    d = STEP_M
+    while d < L - STEP_M * 0.5:
+        pt_xy = route_xy.interpolate(d)
+        pt_ll = _to_proj(Point(pt_xy.x, pt_xy.y),
+                         local_crs, CRS.from_epsg(4326))
+        await rpoint_svc.create_entity(
+            model_data=RoutePointCreate(
+                route_id=route.id,
+                meshed_area_id=meshed.id,
+                point_type=RoutePointType.NAVIGATION,
+                seq_idx=seq,
+                x=float(pt_ll.x),  # lon
+                y=float(pt_ll.y)  # lat
+            )
+        )
+        seq += 1
+        d += STEP_M
 
     return {
         "route_id": route.id,

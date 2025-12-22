@@ -9,10 +9,7 @@ def parse_datetime_warsaw(value):
     if isinstance(value, str):
         value = datetime.fromisoformat(value.replace('Z', '+00:00'))
 
-    if value is None:
-        return None
-
     if value.tzinfo is None:
         value = value.replace(tzinfo=WARSAW_TZ)
 
-    return value
+    return value.astimezone(WARSAW_TZ)
