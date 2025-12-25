@@ -20,7 +20,7 @@ pre-commit = "^4.0.1"
 shapely = ">=2.0"
 geopandas = "*"
 pyproj = "*"
-triangle = "*"
+triangle = {git = "https://github.com/drufat/triangle.git"}
 requests = "*"
 rtree = "*"
 matplotlib = "^3.9"
