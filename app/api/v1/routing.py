@@ -77,7 +77,7 @@ async def _fetch_weather_for_time(weather_points_wgs84: List[tuple], departure_t
 
     for idx, data in weather_data.items():
         weather_dict = {
-            'wind_speed_10m': data.get('wind_speed', 5.0),
+            'wind_speed_10m': data.get('wind_speed', 5.0) * 0.5399570136728,
             'wind_direction_10m': data.get('wind_direction', 0.0),
             'wave_height': data.get('wave_height', 0.5),
             'wave_direction': data.get('wave_direction', 0.0),
@@ -607,7 +607,8 @@ async def calculate_optimal_route(
                 "is_best": is_best,
                 "segments_count": len(variant_data['segments']),
                 "difficulty_score": round(variant_difficulty.calculate_total(), 2),
-                "difficulty_level": variant_difficulty.get_level().value
+                "difficulty_level": variant_difficulty.get_level().value,
+                "waypoints_wgs84": variant_data['waypoints_wgs84']
             })
 
         best_variant_data = variants_results[best_variant_idx]
@@ -713,7 +714,8 @@ async def get_route_variants(
                 "tacks_count": v.tacks_count,
                 "jibes_count": v.jibes_count,
                 "is_best": v.is_best,
-                "is_selected": v.is_selected
+                "is_selected": v.is_selected,
+                "waypoints_wgs84": json.loads(v.waypoints_json) if v.waypoints_json else []
             }
             for v in variants
         ]

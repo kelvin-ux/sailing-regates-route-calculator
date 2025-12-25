@@ -17,7 +17,7 @@ class YachtCreate(BaseModel):
     length: float = Field(..., gt=0)
     beam: float = Field(..., gt=0)
     draft: Optional[float] = Field(None, gt=0)
-    sail_number: Optional[int] = Field(default=2, le=30)
+    sail_number: Optional[str] = Field(default=None, max_length=20)
     has_spinnaker: bool = False
     has_genaker: bool = False
     max_speed: Optional[float] = Field(None, gt=0)
@@ -34,7 +34,7 @@ class YachtUpdate(BaseModel):
     length: Optional[float] = Field(None, gt=0)
     beam: Optional[float] = Field(None, gt=0)
     draft: Optional[float] = Field(None, gt=0)
-    sail_number: Optional[int] = Field(None, le=30)
+    sail_number: Optional[str] = Field(default=None, max_length=20)
     has_spinnaker: Optional[bool] = None
     has_genaker: Optional[bool] = None
     max_speed: Optional[float] = Field(None, gt=0)
@@ -52,7 +52,7 @@ class YachtResponse(BaseModel):
     length: float
     beam: float
     draft: Optional[float]
-    sail_number: Optional[int]
+    sail_number: Optional[str]
     has_spinnaker: bool
     has_genaker: bool
     max_speed: Optional[float]
