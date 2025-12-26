@@ -5,6 +5,7 @@ import numpy as np
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from pyproj import Transformer
+import traceback
 
 from pydantic import UUID4
 from sqlalchemy import delete
@@ -60,7 +61,8 @@ def get_weather_service() -> OpenMeteoService:
     return _weather_service
 
 
-async def _fetch_weather_for_time(weather_points_wgs84: List[tuple], departure_time: datetime, weather_service: OpenMeteoService) -> Dict[int, Dict]:
+async def _fetch_weather_for_time(weather_points_wgs84: List[tuple], departure_time: datetime,
+                                  weather_service: OpenMeteoService) -> Dict[int, Dict]:
     """
     Fetch weather forecast for all weather points at a specific departure time.
     Returns dict mapping point index to weather data.
@@ -77,7 +79,7 @@ async def _fetch_weather_for_time(weather_points_wgs84: List[tuple], departure_t
 
     for idx, data in weather_data.items():
         weather_dict = {
-            'wind_speed_10m': data.get('wind_speed', 5.0) * 0.5399570136728,
+            'wind_speed_10m': data.get('wind_speed', 5.0),
             'wind_direction_10m': data.get('wind_direction', 0.0),
             'wave_height': data.get('wave_height', 0.5),
             'wave_direction': data.get('wave_direction', 0.0),
@@ -162,7 +164,7 @@ async def _calculate_single_route(
         navigable_vertices.append(nav_idx)
 
     if len(navigable_vertices) < len(vertices) * 0.3:
-        print(f"Not enough navigable vertices: {len(navigable_vertices)}/{len(vertices)}")
+        print(f"  [ROUTE] Not enough navigable vertices!")
         return None
 
     query_start = (
@@ -209,27 +211,13 @@ async def _calculate_single_route(
         'triangles': triangles.tolist()
     }
 
-    router_instance = SailingRouter(navigation_mesh, verified_weather_data, yacht)
-    heuristics = SailingHeuristics(yacht, weather_mapping, verified_weather_data)
+    print(f"  [ROUTE] Starting A* search ({len(navigable_vertices)} navigable vertices)...")
 
-    route_result = router_instance.find_optimal_route_with_scores(
-        start=start_xy,
-        goal=stop_xy,
-        weather_mapping=weather_mapping
-    )
-    optimal_path = route_result.path if route_result else None
+    try:
+        router_instance = SailingRouter(navigation_mesh, verified_weather_data, yacht)
+        heuristics = SailingHeuristics(yacht, weather_mapping, verified_weather_data)
 
-    if not optimal_path:
-        safe_router = SailingRouter(
-            navigation_mesh,
-            verified_weather_data,
-            yacht,
-            heuristics_cls=lambda *args, **kwargs: SafeHeuristics(
-                *args, **kwargs, non_navigable=non_navigable_vertices
-            )
-        )
-
-        route_result = safe_router.find_optimal_route_with_scores(
+        route_result = router_instance.find_optimal_route_with_scores(
             start=start_xy,
             goal=stop_xy,
             weather_mapping=weather_mapping
@@ -237,8 +225,33 @@ async def _calculate_single_route(
         optimal_path = route_result.path if route_result else None
 
         if not optimal_path:
-            print(f"No path found for departure {departure_time}")
-            return None
+            print(f"  [ROUTE] Primary A* failed, trying SafeHeuristics...")
+            safe_router = SailingRouter(
+                navigation_mesh,
+                verified_weather_data,
+                yacht,
+                heuristics_cls=lambda *args, **kwargs: SafeHeuristics(
+                    *args, **kwargs, non_navigable=non_navigable_vertices
+                )
+            )
+
+            route_result = safe_router.find_optimal_route_with_scores(
+                start=start_xy,
+                goal=stop_xy,
+                weather_mapping=weather_mapping
+            )
+            optimal_path = route_result.path if route_result else None
+
+            if not optimal_path:
+                print(f"  [ROUTE] No path found for departure {departure_time}")
+                return None
+
+    except Exception as e:
+        print(f"  [ROUTE] A* search error: {e}")
+        traceback.print_exc()
+        return None
+
+    print(f"  [ROUTE] Path found with {len(optimal_path)} waypoints")
 
     transformer_back = Transformer.from_crs(meshed.crs_epsg, 4326, always_xy=True)
     path_wgs84 = [
@@ -405,6 +418,8 @@ async def calculate_optimal_route(
         }
 
         vertices = np.array(navigation_mesh['vertices'])
+        triangles = np.array(navigation_mesh['triangles'])
+
         weather_points_data = json.loads(meshed.weather_points_json) if meshed.weather_points_json else None
 
         if not weather_points_data:
@@ -608,7 +623,8 @@ async def calculate_optimal_route(
                 "segments_count": len(variant_data['segments']),
                 "difficulty_score": round(variant_difficulty.calculate_total(), 2),
                 "difficulty_level": variant_difficulty.get_level().value,
-                "waypoints_wgs84": variant_data['waypoints_wgs84']
+                "waypoints_wgs84": variant_data['waypoints_wgs84'],
+                "segments": variant_data['segments']
             })
 
         best_variant_data = variants_results[best_variant_idx]
@@ -714,8 +730,7 @@ async def get_route_variants(
                 "tacks_count": v.tacks_count,
                 "jibes_count": v.jibes_count,
                 "is_best": v.is_best,
-                "is_selected": v.is_selected,
-                "waypoints_wgs84": json.loads(v.waypoints_json) if v.waypoints_json else []
+                "is_selected": v.is_selected
             }
             for v in variants
         ]
@@ -767,7 +782,6 @@ async def get_calculated_route(
         "calculated_at": route_data.get('calculated_at'),
         "data": route_data
     }
-
 
 
 @router.get("/{meshed_area_id}/difficulty", status_code=200)
