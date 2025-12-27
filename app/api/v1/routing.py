@@ -167,91 +167,69 @@ async def _calculate_single_route(
         print(f"  [ROUTE] Not enough navigable vertices!")
         return None
 
-    query_start = (
+    query_all_points = (
         select(RoutePoint)
         .where(RoutePoint.route_id == meshed.route_id)
-        .where(RoutePoint.point_type == RoutePointType.START)
+        .where(RoutePoint.point_type.in_([RoutePointType.START, RoutePointType.CONTROL, RoutePointType.STOP]))
         .order_by(RoutePoint.seq_idx)
-        .limit(1)
     )
-    query_stop = (
-        select(RoutePoint)
-        .where(RoutePoint.route_id == meshed.route_id)
-        .where(RoutePoint.point_type == RoutePointType.STOP)
-        .order_by(RoutePoint.seq_idx.desc())
-        .limit(1)
-    )
+    result_points = await session.execute(query_all_points)
+    route_points = result_points.scalars().all()
 
-    result_start = await session.execute(query_start)
-    result_stop = await session.execute(query_stop)
-
-    start_point = result_start.scalar_one_or_none()
-    stop_point = result_stop.scalar_one_or_none()
-
-    if not start_point or not stop_point:
+    if len(route_points) < 2:
+        print("Not enough route points")
         return None
 
     transformer = Transformer.from_crs(4326, meshed.crs_epsg, always_xy=True)
+    transformer_back = Transformer.from_crs(meshed.crs_epsg, 4326, always_xy=True)
 
-    start_xy = transformer.transform(start_point.x, start_point.y)
-    stop_xy = transformer.transform(stop_point.x, stop_point.y)
+    navigation_mesh = {'vertices': vertices.tolist(), 'triangles': triangles.tolist()}
 
-    start_vertex_idx = np.argmin(np.sum((vertices - start_xy) ** 2, axis=1))
-    if start_vertex_idx not in navigable_vertices:
-        print(f"Start point not navigable for departure {departure_time}")
-        return None
+    router_instance = SailingRouter(navigation_mesh, verified_weather_data, yacht)
+    heuristics = SailingHeuristics(yacht, weather_mapping, verified_weather_data)
 
-    stop_vertex_idx = np.argmin(np.sum((vertices - stop_xy) ** 2, axis=1))
-    if stop_vertex_idx not in navigable_vertices:
-        print(f"Stop point not navigable for departure {departure_time}")
-        return None
-
-    navigation_mesh = {
-        'vertices': vertices.tolist(),
-        'triangles': triangles.tolist()
-    }
-
-    print(f"  [ROUTE] Starting A* search ({len(navigable_vertices)} navigable vertices)...")
-
-    try:
-        router_instance = SailingRouter(navigation_mesh, verified_weather_data, yacht)
-        heuristics = SailingHeuristics(yacht, weather_mapping, verified_weather_data)
-
-        route_result = router_instance.find_optimal_route_with_scores(
-            start=start_xy,
-            goal=stop_xy,
-            weather_mapping=weather_mapping
+    safe_router = SailingRouter(
+        navigation_mesh, verified_weather_data, yacht,
+        heuristics_cls=lambda *args, **kwargs: SafeHeuristics(
+            *args, **kwargs, non_navigable=non_navigable_vertices
         )
-        optimal_path = route_result.path if route_result else None
+    )
 
-        if not optimal_path:
-            print(f"  [ROUTE] Primary A* failed, trying SafeHeuristics...")
-            safe_router = SailingRouter(
-                navigation_mesh,
-                verified_weather_data,
-                yacht,
-                heuristics_cls=lambda *args, **kwargs: SafeHeuristics(
-                    *args, **kwargs, non_navigable=non_navigable_vertices
-                )
+    full_path = []
+
+    for i in range(len(route_points) - 1):
+        pt_a = route_points[i]
+        pt_b = route_points[i + 1]
+        xy_a = transformer.transform(pt_a.x, pt_a.y)
+        xy_b = transformer.transform(pt_b.x, pt_b.y)
+        idx_a = np.argmin(np.sum((vertices - xy_a) ** 2, axis=1))
+        idx_b = np.argmin(np.sum((vertices - xy_b) ** 2, axis=1))
+
+        if idx_a not in navigable_vertices or idx_b not in navigable_vertices:
+            print(f"    Leg {i}: Points not navigable. Skipping.")
+            return None
+
+        leg_result = router_instance.find_optimal_route_with_scores(
+            start=xy_a, goal=xy_b, weather_mapping=weather_mapping
+        )
+
+        if not leg_result or not leg_result.path:
+            leg_result = safe_router.find_optimal_route_with_scores(
+                start=xy_a, goal=xy_b, weather_mapping=weather_mapping
             )
 
-            route_result = safe_router.find_optimal_route_with_scores(
-                start=start_xy,
-                goal=stop_xy,
-                weather_mapping=weather_mapping
-            )
-            optimal_path = route_result.path if route_result else None
+        if not leg_result or not leg_result.path:
+            print(f"    Leg {i}: No path found.")
+            return None
 
-            if not optimal_path:
-                print(f"  [ROUTE] No path found for departure {departure_time}")
-                return None
+        path_segment = leg_result.path
+        if i > 0:
+            path_segment = path_segment[1:]
 
-    except Exception as e:
-        print(f"  [ROUTE] A* search error: {e}")
-        traceback.print_exc()
-        return None
+        full_path.extend(path_segment)
 
-    print(f"  [ROUTE] Path found with {len(optimal_path)} waypoints")
+
+    optimal_path = full_path
 
     transformer_back = Transformer.from_crs(meshed.crs_epsg, 4326, always_xy=True)
     path_wgs84 = [
@@ -338,26 +316,6 @@ async def _calculate_single_route(
 
     if len(segments) == 0:
         return None
-
-    if route_result and route_result.f_scores:
-        transformer_back = Transformer.from_crs(meshed.crs_epsg, 4326, always_xy=True)
-        path_data = []
-        for i, idx in enumerate(route_result.path_indices):
-            x, y = vertices[idx]
-            lon, lat = transformer_back.transform(x, y)
-            path_data.append({
-                "x": lon,
-                "y": lat,
-                "seq_idx": 5000 + i,
-                "heuristic_score": route_result.f_scores.get(idx, 0.0)
-            })
-
-        await save_path_heuristics(
-            session,
-            meshed.route_id,
-            meshed.id,
-            path_data
-        )
 
     avg_wind_speed = total_wind_speed / valid_weather_count if valid_weather_count > 0 else 0.0
     avg_wind_direction = total_wind_direction / valid_weather_count if valid_weather_count > 0 else 0.0

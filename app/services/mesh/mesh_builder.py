@@ -262,10 +262,13 @@ async def create_route_and_mesh(session: AsyncSession, payload: CreateRouteAndMe
         max_area_m2=[payload.area1, payload.area2, payload.area3],
     )
 
+    control_points_xy = list(route_xy.coords)
+
     nav_mesh = triangulate_water(
         water_xy, route_xy, nav_zones,
         coast_clear_m=COAST_CLEAR_M,
-        coast_simplify_m=COAST_SIMPLY
+        coast_simplify_m=COAST_SIMPLY,
+        fixed_points=control_points_xy
     )
 
     nav_vertices = nav_mesh.get("vertices", [])

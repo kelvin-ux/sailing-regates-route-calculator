@@ -1,32 +1,20 @@
 from __future__ import annotations
-
-from typing import List
-from typing import Dict
-from typing import Any
-
+from typing import List, Dict, Any, Optional
 import numpy as np
-
 from shapely import geometry as shp
-from shapely.geometry import Polygon
-from shapely.geometry import MultiPolygon
-from shapely.geometry import LineString
-from shapely.geometry import LinearRing
+from shapely.geometry import Polygon, MultiPolygon, LineString, LinearRing, Point
 from shapely.validation import make_valid as _make_valid
-
 import triangle as tr
-
 from app.schemas.meshzones import MeshZones
 
-_EPS_AREA = 1e-6  # m^2
+_EPS_AREA = 1e-6
+
 
 def _valid_geom(g: shp.base.BaseGeometry) -> shp.base.BaseGeometry:
     if g is None or g.is_empty:
         return g
     try:
-        if _make_valid:
-            gv = _make_valid(g)
-        else:
-            gv = g.buffer(0)
+        gv = _make_valid(g) if _make_valid else g.buffer(0)
         return gv if not gv.is_empty else g
     except Exception:
         try:
@@ -35,18 +23,15 @@ def _valid_geom(g: shp.base.BaseGeometry) -> shp.base.BaseGeometry:
             return g
 
 
-
 def _ring_indices(coords, vertices, idx_map) -> List[int]:
     coords = list(coords)
     if len(coords) >= 2 and coords[0] == coords[-1]:
         coords = coords[:-1]
-
     base = []
     seen_local = set()
     for x, y in coords:
         key = (float(x), float(y))
-        if key in seen_local:
-            continue
+        if key in seen_local: continue
         seen_local.add(key)
         if key in idx_map:
             i = idx_map[key]
@@ -55,63 +40,41 @@ def _ring_indices(coords, vertices, idx_map) -> List[int]:
             vertices.append(key)
             idx_map[key] = i
         base.append(i)
-
-    if len(base) < 3:
-        return []
-
-    try:
-        ring = LinearRing([vertices[i] for i in base])
-        area = abs(Polygon([vertices[i] for i in base]).area)
-        if not np.isfinite(area) or area < _EPS_AREA:
-            return []
-    except Exception:
-        try:
-            area = abs(Polygon([vertices[i] for i in base]).area)
-            if area < _EPS_AREA:
-                return []
-        except Exception:
-            return []
-
+    if len(base) < 3: return []
     return base
 
 
-def _poly_to_pslg(poly: Polygon) -> Dict[str, Any]:
-    """Konwersja Polygon -> PSLG: vertices, segments, holes."""
+def _poly_to_pslg(poly: Polygon, fixed_points: List[tuple] = None) -> Dict[str, Any]:
     if poly.is_empty or abs(poly.area) < _EPS_AREA:
         return {"vertices": np.zeros((0, 2)), "segments": np.zeros((0, 2), dtype=int), "holes": []}
 
     poly = _valid_geom(poly)
-    if poly.is_empty or not isinstance(poly, Polygon):
-        return {"vertices": np.zeros((0, 2)), "segments": np.zeros((0, 2), dtype=int), "holes": []}
-
     vertices, segments, idx_map = [], [], {}
 
-    # exterior
     ext = _ring_indices(list(poly.exterior.coords), vertices, idx_map)
-    if not ext:
-        return {"vertices": np.zeros((0, 2)), "segments": np.zeros((0, 2), dtype=int), "holes": []}
     for i in range(len(ext)):
         a, b = ext[i], ext[(i + 1) % len(ext)]
-        if a != b:
-            segments.append((a, b))
+        if a != b: segments.append((a, b))
 
-    # holes
     holes_xy = []
     for interior in poly.interiors:
         base = _ring_indices(list(interior.coords), vertices, idx_map)
-        if not base:
-            continue
         for i in range(len(base)):
             a, b = base[i], base[(i + 1) % len(base)]
-            if a != b:
-                segments.append((a, b))
+            if a != b: segments.append((a, b))
         try:
             ip = Polygon(interior)
             if abs(ip.area) >= _EPS_AREA:
                 rp = ip.representative_point()
                 holes_xy.append((float(rp.x), float(rp.y)))
-        except Exception:
+        except:
             pass
+
+    if fixed_points:
+        for fx, fy in fixed_points:
+            key = (float(fx), float(fy))
+            if key not in idx_map:
+                vertices.append(key)
 
     if not segments or len(vertices) < 3:
         return {"vertices": np.zeros((0, 2)), "segments": np.zeros((0, 2), dtype=int), "holes": []}
@@ -123,81 +86,61 @@ def _poly_to_pslg(poly: Polygon) -> Dict[str, Any]:
     }
 
 
-def _triangulate_single_polygon(poly: Polygon, max_area: float) -> Dict[str, Any]:
-    """Triangulacja pojedynczego Polygonu """
-    pslg = _poly_to_pslg(poly)
-    V = pslg["vertices"]
-    S = pslg["segments"]
+def _triangulate_single_polygon(poly: Polygon, max_area: float, fixed_points: List[tuple] = None) -> Dict[str, Any]:
+    pslg = _poly_to_pslg(poly, fixed_points)
+    V, S = pslg["vertices"], pslg["segments"]
     if V.size == 0 or S.size == 0:
         return {"vertices": np.zeros((0, 2)), "triangles": np.zeros((0, 3), dtype=int)}
 
-    # sanity indeksów
-    if S.max(initial=-1) >= V.shape[0] or S.min(initial=0) < 0:
-        return {"vertices": np.zeros((0, 2)), "triangles": np.zeros((0, 3), dtype=int)}
-
     data = {"vertices": V, "segments": S}
-    if pslg["holes"]:
-        data["holes"] = np.asarray(pslg["holes"], dtype=float)
+    if pslg["holes"]: data["holes"] = np.asarray(pslg["holes"], dtype=float)
 
-    # p=PSLG, q30= jakość (min kąt ~30°), aX= limit powierzchni trójkąta
-    opts = f"pq30a{max_area}"
     try:
-        result = tr.triangulate(data, opts)
-    except Exception:
+        result = tr.triangulate(data, f"pq30a{max_area}")
+    except:
         return {"vertices": np.zeros((0, 2)), "triangles": np.zeros((0, 3), dtype=int)}
 
     V2 = np.asarray(result.get("vertices", np.zeros((0, 2))), dtype=float)
     T2 = np.asarray(result.get("triangles", np.zeros((0, 3))), dtype=int)
-    if V2.ndim != 2 or V2.shape[0] == 0 or T2.ndim != 2 or T2.shape[0] == 0:
-        return {"vertices": np.zeros((0, 2)), "triangles": np.zeros((0, 3), dtype=int)}
     return {"vertices": V2, "triangles": T2}
 
 
-def _triangulate_geom(geom: shp.base.BaseGeometry, max_area: float) -> Dict[str, Any]:
+def _triangulate_geom(geom: shp.base.BaseGeometry, max_area: float, fixed_points: List[tuple] = None) -> Dict[str, Any]:
     g = _valid_geom(geom)
     if g is None or g.is_empty:
         return {"vertices": np.zeros((0, 2)), "triangles": np.zeros((0, 3), dtype=int)}
 
-    if isinstance(g, Polygon):
-        polys = [g]
-    elif isinstance(g, MultiPolygon):
-        polys = [p for p in g.geoms if isinstance(p, Polygon)]
-    else:
-        try:
-            polys = [p for p in g if isinstance(p, Polygon)]
-        except Exception:
-            polys = []
+    polys = [g] if isinstance(g, Polygon) else [p for p in g.geoms if isinstance(p, Polygon)] if isinstance(g,
+                                                                                                            MultiPolygon) else []
 
     all_V, all_T, offset = [], [], 0
     for p in polys:
-        if p.is_empty or abs(p.area) < _EPS_AREA:
-            continue
-        mesh = _triangulate_single_polygon(p, max_area=max_area)
+        if p.is_empty or abs(p.area) < _EPS_AREA: continue
+        p_fixed = []
+        if fixed_points:
+            for fx, fy in fixed_points:
+                pt = Point(fx, fy)
+                if p.contains(pt) or p.distance(pt) < 1e-3:
+                    p_fixed.append((fx, fy))
+
+        mesh = _triangulate_single_polygon(p, max_area=max_area, fixed_points=p_fixed)
         V = np.asarray(mesh["vertices"])
         T = np.asarray(mesh["triangles"], dtype=int)
-        if V.size == 0 or T.size == 0:
-            continue
+        if V.size == 0 or T.size == 0: continue
         all_V.append(V)
         all_T.append(T + offset)
         offset += V.shape[0]
 
-    if not all_V:
-        return {"vertices": np.zeros((0, 2)), "triangles": np.zeros((0, 3), dtype=int)}
-
-    Vout = np.vstack(all_V)
-    Tout = np.vstack(all_T) if all_T else np.zeros((0, 3), dtype=int)
-    return {"vertices": Vout, "triangles": Tout}
-
+    if not all_V: return {"vertices": np.zeros((0, 2)), "triangles": np.zeros((0, 3), dtype=int)}
+    return {"vertices": np.vstack(all_V), "triangles": np.vstack(all_T)}
 
 
 def triangulate_water(water_xy: shp.base.BaseGeometry,
                       route_xy: LineString,
                       zones: MeshZones,
                       coast_clear_m: float = 0.0,
-                      coast_simplify_m: float = 0.0) -> Dict[str, Any]:
-    """
-    Triangulacja z priorytetem przy trasie i wygaszaniem przy brzegu.
-    """
+                      coast_simplify_m: float = 0.0,
+                      fixed_points: List[tuple] = None) -> Dict[str, Any]:
     g_raw = _valid_geom(water_xy)
     if g_raw is None or g_raw.is_empty:
         return {"vertices": np.zeros((0, 2)), "triangles": np.zeros((0, 3), dtype=int)}
@@ -208,35 +151,31 @@ def triangulate_water(water_xy: shp.base.BaseGeometry,
     B1 = route_xy.buffer(r1, cap_style=2, join_style=2)
     B2 = route_xy.buffer(r2, cap_style=2, join_style=2)
 
-    # erozja/uprościenie dla mid/far
     g_ero = g_raw
-    if coast_clear_m and coast_clear_m > 0:
-        g_ero = _valid_geom(g_ero.buffer(-float(coast_clear_m)))
-    if coast_simplify_m and coast_simplify_m > 0:
+    if coast_clear_m > 0: g_ero = _valid_geom(g_ero.buffer(-float(coast_clear_m)))
+    if coast_simplify_m > 0:
         try:
             g_ero = _valid_geom(g_ero.simplify(float(coast_simplify_m), preserve_topology=True))
-        except Exception:
+        except:
             pass
-    if g_ero is None or g_ero.is_empty:
-        g_ero = g_raw
+    if g_ero is None or g_ero.is_empty: g_ero = g_raw
 
-    # rozłączne strefy
     near = _valid_geom(g_raw.intersection(B1))
-    mid  = _valid_geom(g_ero.intersection(B2.difference(B1)))
-    far  = _valid_geom(g_ero.difference(B2))
+    mid = _valid_geom(g_ero.intersection(B2.difference(B1)))
+    far = _valid_geom(g_ero.difference(B2))
 
     parts = []
     for geom, area in ((near, a1), (mid, a2), (far, a3)):
-        if geom is None or geom.is_empty:
-            continue
-        mesh = _triangulate_geom(geom, max_area=area)
-        V = np.asarray(mesh["vertices"]); T = np.asarray(mesh["triangles"], dtype=int)
-        if V.size == 0 or T.size == 0:
-            continue
+        if geom is None or geom.is_empty: continue
+
+        # Pass fixed points to the triangulation of the specific zone
+        mesh = _triangulate_geom(geom, max_area=area, fixed_points=fixed_points)
+        V = np.asarray(mesh["vertices"]);
+        T = np.asarray(mesh["triangles"], dtype=int)
+        if V.size == 0 or T.size == 0: continue
         parts.append((V, T))
 
-    if not parts:
-        return {"vertices": np.zeros((0, 2)), "triangles": np.zeros((0, 3), dtype=int)}
+    if not parts: return {"vertices": np.zeros((0, 2)), "triangles": np.zeros((0, 3), dtype=int)}
 
     Vs, Ts, offset = [], [], 0
     for V, T in parts:
@@ -244,6 +183,7 @@ def triangulate_water(water_xy: shp.base.BaseGeometry,
         Ts.append(T + offset)
         offset += V.shape[0]
 
-    Vout = np.vstack(Vs) if Vs else np.zeros((0, 2))
-    Tout = np.vstack(Ts) if Ts else np.zeros((0, 3), dtype=int)
-    return {"vertices": Vout, "triangles": Tout}
+    return {
+        "vertices": np.vstack(Vs) if Vs else np.zeros((0, 2)),
+        "triangles": np.vstack(Ts) if Ts else np.zeros((0, 3), dtype=int)
+    }
