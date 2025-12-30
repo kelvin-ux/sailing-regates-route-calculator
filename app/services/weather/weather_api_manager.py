@@ -8,6 +8,7 @@ from typing import List
 from typing import Dict
 from typing import Optional
 from typing import Tuple
+import math
 
 from app.schemas.weather import MarineWeatherRequest
 from app.services.weather.WeatherCache import WeatherCache
@@ -66,18 +67,28 @@ class OpenMeteoService:
                 self.stats['errors'] += 1
                 return self._default_marine_weather()
 
-    async def fetch_marine_weather_at_time(self, lat: float, lon: float, target_time: datetime) -> Dict:
-        """
-        Fetch marine weather forecast for a specific time.
-        Uses hourly forecast data and finds the closest hour.
-        """
+    async def fetch_marine_weather_at_time(self, lat: float, lon: float, target_time: datetime) -> Dict:        
         self.stats['total_requests'] += 1
 
         if target_time.tzinfo is None:
             target_time = target_time.replace(tzinfo=WARSAW_TZ)
 
-        target_hour = target_time.replace(minute=0, second=0, microsecond=0)
-        cache_key = f"marine_forecast:{lat:.2f}:{lon:.2f}:{target_hour.isoformat()}"
+        now = datetime.now(WARSAW_TZ)
+        effective_time = max(target_time, now)
+        
+        #  Zaokrąglij do najbliższej PRZYSZŁEJ kwarty (ceil, nie floor!)
+        minutes_ceil = math.ceil(effective_time.minute / 15) * 15
+        
+        if minutes_ceil >= 60:
+            target_rounded = (effective_time + timedelta(hours=1)).replace(
+                minute=0, second=0, microsecond=0
+            )
+        else:
+            target_rounded = effective_time.replace(
+                minute=minutes_ceil, second=0, microsecond=0
+            )
+        
+        cache_key = f"marine_forecast:{lat:.2f}:{lon:.2f}:{target_rounded.isoformat()}"
 
         cached = await self.cache.get(cache_key)
         if cached:
@@ -88,7 +99,7 @@ class OpenMeteoService:
             self.stats['api_calls'] += 1
 
             try:
-                weather_data = await self._fetch_forecast_at_time(lat, lon, target_time)
+                weather_data = await self._fetch_forecast_at_time(lat, lon, target_rounded)
                 await self.cache.set(cache_key, weather_data)
                 return weather_data
 
@@ -98,12 +109,12 @@ class OpenMeteoService:
                 return self._default_marine_weather()
 
     async def _fetch_forecast_at_time(self, lat: float, lon: float, target_time: datetime) -> Dict:
-        """Fetch hourly forecast and extract data for specific time."""
+        print(f"[WEATHER] Fetching forecast for {target_time.isoformat()} at ({lat:.2f}, {lon:.2f})")
 
         async with aiohttp.ClientSession() as session:
             now = datetime.now(WARSAW_TZ)
             days_ahead = max(1, (target_time - now).days + 2)
-            days_ahead = min(days_ahead, 7)  # Max 7 days forecast
+            days_ahead = min(days_ahead, 7)
 
             marine_params = {
                 'latitude': lat,
@@ -120,6 +131,7 @@ class OpenMeteoService:
                     'swell_wave_period',
                 ]),
                 'forecast_days': days_ahead,
+                'past_days': 1,
                 'timezone': 'auto'
             }
 
@@ -135,6 +147,7 @@ class OpenMeteoService:
                     'wind_gusts_10m'
                 ]),
                 'forecast_days': days_ahead,
+                'past_days': 1,
                 'timezone': 'auto'
             }
 
@@ -149,14 +162,23 @@ class OpenMeteoService:
             weather_hourly = {}
             time_index = None
 
-            if isinstance(marine_response, aiohttp.ClientResponse) and marine_response.status == 200:
-                marine_json = await marine_response.json()
-                if 'hourly' in marine_json:
-                    marine_hourly = marine_json['hourly']
-                    times = marine_hourly.get('time', [])
-                    time_index = self._find_closest_time_index(times, target_time)
+            if isinstance(marine_response, Exception):
+                print(f"[WEATHER] Marine API exception: {marine_response}")
+            elif isinstance(marine_response, aiohttp.ClientResponse):
+                if marine_response.status == 200:
+                    marine_json = await marine_response.json()
+                    if 'hourly' in marine_json:
+                        marine_hourly = marine_json['hourly']
+                        times = marine_hourly.get('time', [])
+                        time_index = self._find_closest_time_index(times, target_time)
+                    elif 'error' in marine_json:
+                        print(f"[WEATHER] Marine API error: {marine_json.get('error')} at ({lat:.2f}, {lon:.2f})")
+                else:
+                    print(f"[WEATHER] Marine API status {marine_response.status} at ({lat:.2f}, {lon:.2f})")
 
-            if isinstance(weather_response, aiohttp.ClientResponse) and weather_response.status == 200:
+            if isinstance(weather_response, Exception):
+                print(f"[WEATHER] Weather API exception: {weather_response}")
+            elif isinstance(weather_response, aiohttp.ClientResponse) and weather_response.status == 200:
                 weather_json = await weather_response.json()
                 if 'hourly' in weather_json:
                     weather_hourly = weather_json['hourly']
@@ -165,8 +187,16 @@ class OpenMeteoService:
                         time_index = self._find_closest_time_index(times, target_time)
 
             if time_index is None:
-                print(f"Could not find time index for {target_time}")
-                return self._default_marine_weather()
+                if weather_hourly and not marine_hourly:
+                    print(f"[WEATHER] No marine data at ({lat:.2f}, {lon:.2f}) - using weather only")
+                    times = weather_hourly.get('time', [])
+                    time_index = self._find_closest_time_index(times, target_time)
+                
+                if time_index is None:
+                    available_times = marine_hourly.get('time', [])[:3] if marine_hourly else []
+                    weather_times = weather_hourly.get('time', [])[:3] if weather_hourly else []
+                    print(f"Could not find time index for {target_time}. Marine times: {available_times}, Weather times: {weather_times}")
+                    return self._default_marine_weather()
 
             def safe_get(data: dict, key: str, idx: int, default=None):
                 arr = data.get(key, [])
@@ -192,7 +222,7 @@ class OpenMeteoService:
                 'swell_wave_direction': safe_get(marine_hourly, 'swell_wave_direction', time_index, 0.0),
                 'swell_wave_period': safe_get(marine_hourly, 'swell_wave_period', time_index, 6.0),
 
-                'current_velocity': 0.1,  # Not available in hourly, use default
+                'current_velocity': 0.1,
                 'current_direction': 0.0,
 
                 'temperature': safe_get(weather_hourly, 'temperature_2m', time_index, 15.0),
@@ -207,7 +237,6 @@ class OpenMeteoService:
             }
 
     def _find_closest_time_index(self, times: List[str], target_time: datetime) -> Optional[int]:
-        """Find index of closest time in the forecast array."""
         if not times:
             return None
 
@@ -237,9 +266,6 @@ class OpenMeteoService:
                                   points: List[Tuple[float, float]],
                                   target_time: datetime,
                                   priorities: Optional[List[int]] = None) -> Dict[int, Dict]:
-        """
-        Fetch weather forecast for multiple points at a specific time.
-        """
         if not priorities:
             priorities = [0] * len(points)
 
