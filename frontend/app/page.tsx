@@ -4,6 +4,8 @@ import dynamic from 'next/dynamic';
 import { useState, useEffect, useCallback } from 'react';
 import LoadingOverlay from '../components/LoadingOverlay';
 import SplashScreen from '../components/SplashScreen';
+import RouteAnimation, { AnimationToggleButton } from '../components/RouteAnimation';
+import { WindBarbLegend } from '../components/WindBarb';
 
 // Import mapy bez SSR
 const SailingMap = dynamic(() => import('../components/Map'), {
@@ -43,8 +45,8 @@ type ControlPoint = {
   lat: number;
   lon: number;
   type: ControlPointType;
-  width?: number; // szerokość bramki w metrach
-  desc?: string;  // opis punktu
+  width?: number;
+  desc?: string;
 };
 
 // Ustawienia mesh
@@ -86,7 +88,7 @@ type RouteSegment = {
   wind_speed_knots: number;
   wind_direction: number;
   twa: number;
-  point_of_sail: string;
+  point_of_sail?: string;
   wave_height_m: number;
 };
 
@@ -113,7 +115,7 @@ type RouteVariant = {
   segments_count: number;
   difficulty_score: number;
   difficulty_level: string;
-  waypoints_wgs84?: [number, number][]; // lon, lat pairs from backend
+  waypoints_wgs84?: [number, number][];
   segments?: RouteSegment[];
 };
 
@@ -136,6 +138,13 @@ type CalculationStatus = {
   routeResult?: RouteResult | null;
 };
 
+// Animation state
+type AnimationState = {
+  position: [number, number];
+  bearing: number;
+  progress: number;
+} | null;
+
 // Domyślny formularz nowego jachtu
 const emptyYachtForm = {
   name: "",
@@ -154,12 +163,11 @@ const emptyYachtForm = {
   polar_data: {}
 };
 
-// Helper: generuj domyślne okno startowe (od teraz do +24h) w czasie warszawskim
+// Helper: generuj domyślne okno startowe
 const getDefaultStartWindow = () => {
   const now = new Date();
   const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
-  // Format dla datetime-local input: YYYY-MM-DDTHH:MM (czas lokalny)
   const formatForInput = (d: Date) => {
     const year = d.getFullYear();
     const month = String(d.getMonth() + 1).padStart(2, '0');
@@ -176,28 +184,26 @@ const getDefaultStartWindow = () => {
   };
 };
 
-// Adres API
 const API_URL = "http://localhost:8000/api/v1";
 
 export default function Home() {
   // --- STANY ---
   const [allYachts, setAllYachts] = useState<Yacht[]>([]);
   const [mySessionIds, setMySessionIds] = useState<string[]>([]);
-
   const [selectedYachtId, setSelectedYachtId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'presets' | 'my'>('presets');
 
   // UI - Routing i punkty kontrolne
   const [controlPoints, setControlPoints] = useState<ControlPoint[]>([]);
   const [isCalculating, setIsCalculating] = useState(false);
-  const [expandedSection, setExpandedSection] = useState<'yachts' | 'route' | 'startWindow' | 'results' | 'meshSettings' | null>('yachts');
+  const [expandedSection, setExpandedSection] = useState<'yachts' | 'route' | 'startWindow' | 'results' | 'meshSettings' | 'animation' | null>('yachts');
 
   // UI - Edycja punktu
   const [editingPointIndex, setEditingPointIndex] = useState<number | null>(null);
 
   // UI - Ustawienia mesh
   const [meshSettings, setMeshSettings] = useState<MeshSettings>(DEFAULT_MESH_SETTINGS);
-  const [useAutoMesh, setUseAutoMesh] = useState(true); // automatyczne dostosowanie parametrów
+  const [useAutoMesh, setUseAutoMesh] = useState(true);
 
   // UI - Dodawanie jachtu
   const [isAddingYacht, setIsAddingYacht] = useState(false);
@@ -209,24 +215,31 @@ export default function Home() {
   // UI - Splash screen
   const [showSplash, setShowSplash] = useState(true);
 
-  // NOWE: Okno startowe
+  // Okno startowe
   const [startWindow, setStartWindow] = useState(getDefaultStartWindow);
   const [useTimeWindow, setUseTimeWindow] = useState(false);
 
-  // NOWE: Status obliczania
+  // Status obliczania
   const [calcStatus, setCalcStatus] = useState<CalculationStatus>({
     step: 'idle',
     message: '',
     routeResult: null
   });
 
-  // NOWE: Wybrane warianty do wyświetlenia na mapie
+  // Wybrane warianty
   const [selectedVariantIds, setSelectedVariantIds] = useState<string[]>([]);
 
-  // NOWE: Dane wariantów (waypoints, segments, tack points)
+  // Dane wariantów
   const [variantWaypoints, setVariantWaypoints] = useState<Record<string, [number, number][]>>({});
   const [variantSegments, setVariantSegments] = useState<Record<string, RouteSegment[]>>({});
   const [variantTackPoints, setVariantTackPoints] = useState<Record<string, TackPoint[]>>({});
+
+  // === ANIMATION STATE ===
+  const [isAnimating, setIsAnimating] = useState(false);
+  const [animationState, setAnimationState] = useState<AnimationState>(null);
+  const [activeSegmentIndex, setActiveSegmentIndex] = useState<number>(0);
+  const [showWindBarbs, setShowWindBarbs] = useState(true);
+  const [showAnimationPanel, setShowAnimationPanel] = useState(false);
 
   // --- INICJALIZACJA ---
   useEffect(() => {
@@ -262,7 +275,6 @@ export default function Home() {
   const myYachts = allYachts.filter(y => mySessionIds.includes(y.id));
 
   // --- AKCJE JACHTÓW ---
-
   const handleCreateYacht = async () => {
     try {
         setError(null);
@@ -274,24 +286,19 @@ export default function Home() {
 
         if (res.ok) {
             const createdYacht = await res.json();
-
             setAllYachts(prev => [...prev, createdYacht]);
-
             const newSessionIds = [...mySessionIds, createdYacht.id];
             setMySessionIds(newSessionIds);
             sessionStorage.setItem("my_yacht_ids", JSON.stringify(newSessionIds));
-
             setIsAddingYacht(false);
             setNewYachtData(emptyYachtForm);
             setActiveTab('my');
             setSelectedYachtId(createdYacht.id);
         } else {
             const errorText = await res.text();
-            console.error("Błąd tworzenia jachtu", errorText);
             setError(`Nie udało się utworzyć jachtu: ${errorText}`);
         }
     } catch (err) {
-      console.error(err);
       setError(err instanceof Error ? err.message : "Nie udało się utworzyć jachtu");
     }
   };
@@ -305,17 +312,14 @@ export default function Home() {
         const res = await fetch(`${API_URL}/yacht/${id}`, { method: 'DELETE' });
         if (res.ok || res.status === 204) {
             setAllYachts(prev => prev.filter(y => y.id !== id));
-
             const newSessionIds = mySessionIds.filter(mid => mid !== id);
             setMySessionIds(newSessionIds);
             sessionStorage.setItem("my_yacht_ids", JSON.stringify(newSessionIds));
-
             if (selectedYachtId === id) setSelectedYachtId(null);
         } else {
             setError("Nie udało się usunąć jachtu");
         }
     } catch (err) {
-      console.error(err);
       setError(err instanceof Error ? err.message : "Nie udało się usunąć jachtu");
     }
   };
@@ -323,12 +327,10 @@ export default function Home() {
   // --- MAPA I ROUTING ---
   const addPoint = (lat: number, lng: number) => {
     if (isCalculating) return;
-    if (calcStatus.routeResult) return; // nie dodawaj gdy trasa obliczona
+    if (calcStatus.routeResult) return;
 
     const numPoints = controlPoints.length;
     let pointType: ControlPointType = 'WAYPOINT';
-
-    // Pierwszy punkt = START, domyślnie
     if (numPoints === 0) {
       pointType = 'START';
     }
@@ -342,13 +344,10 @@ export default function Home() {
 
     setControlPoints(prev => {
       const updated = [...prev, newPoint];
-      // Jeśli więcej niż 1 punkt, ostatni automatycznie staje się FINISH
       if (updated.length > 1) {
-        // Poprzedni ostatni punkt - jeśli był FINISH, zmień na WAYPOINT
         if (updated[updated.length - 2].type === 'FINISH') {
           updated[updated.length - 2] = { ...updated[updated.length - 2], type: 'WAYPOINT' };
         }
-        // Nowy ostatni punkt = FINISH
         updated[updated.length - 1] = { ...updated[updated.length - 1], type: 'FINISH' };
       }
       return updated;
@@ -360,7 +359,6 @@ export default function Home() {
   const removePoint = (index: number) => {
     setControlPoints(prev => {
       const updated = prev.filter((_, i) => i !== index);
-      // Zaktualizuj typy po usunięciu
       if (updated.length > 0) {
         updated[0] = { ...updated[0], type: 'START' };
         if (updated.length > 1) {
@@ -376,10 +374,6 @@ export default function Home() {
     setControlPoints(prev => prev.map((p, i) => i === index ? { ...p, ...updates } : p));
   };
 
-  // Konwersja ControlPoints na format dla API/mapy
-  const getRoutePointsForApi = () => controlPoints.map(p => ({ lat: p.lat, lon: p.lon }));
-  const getMarkersForMap = (): [number, number][] => controlPoints.map(p => [p.lat, p.lon]);
-
   // ========================================
   // GŁÓWNY WORKFLOW OBLICZANIA TRASY
   // ========================================
@@ -391,62 +385,50 @@ export default function Home() {
     setCalcStatus({ step: 'mesh', message: 'Tworzenie siatki nawigacyjnej...' });
 
     try {
-      // ============ KROK 1: Tworzenie MESH ============
+      // KROK 1: Tworzenie MESH
       console.log("🔷 KROK 1: Tworzenie mesh...");
 
-      // Oblicz rozmiar obszaru
       const latSpan = Math.max(...controlPoints.map(p => p.lat)) - Math.min(...controlPoints.map(p => p.lat));
       const lonSpan = Math.max(...controlPoints.map(p => p.lon)) - Math.min(...controlPoints.map(p => p.lon));
-      const spanNm = Math.max(latSpan, lonSpan) * 60; // przybliżone nm
-      const numPoints = controlPoints.length;
+      const spanNm = Math.max(latSpan, lonSpan) * 60;
 
-      // Oblicz minimalną odległość między sąsiednimi punktami (w nm)
       let minSegmentNm = Infinity;
       for (let i = 0; i < controlPoints.length - 1; i++) {
         const p1 = controlPoints[i];
         const p2 = controlPoints[i + 1];
-        const dLat = (p2.lat - p1.lat) * 60; // nm
-        const dLon = (p2.lon - p1.lon) * 60 * Math.cos(p1.lat * Math.PI / 180); // nm z korekcją szerokości
+        const dLat = (p2.lat - p1.lat) * 60;
+        const dLon = (p2.lon - p1.lon) * 60 * Math.cos(p1.lat * Math.PI / 180);
         const dist = Math.sqrt(dLat * dLat + dLon * dLon);
         if (dist < minSegmentNm) minSegmentNm = dist;
       }
 
-      console.log(`📊 Trasa: ${numPoints} punktów, span: ${spanNm.toFixed(2)} nm, min segment: ${minSegmentNm.toFixed(3)} nm`);
-
       let corridorNm, ring1, ring2, ring3, area1, area2, area3, maxWeatherPts, weatherGrid, shorelineAvoid;
 
       if (useAutoMesh) {
-        // KLUCZOWE: Korytarz nie może być większy niż 40% najkrótszego segmentu
         const maxCorridorFromSegment = minSegmentNm * 0.4;
 
         if (minSegmentNm < 0.3 || spanNm < 1) {
-          console.log("⚡ Tryb AUTO: MICRO");
           corridorNm = Math.min(0.1, maxCorridorFromSegment);
           ring1 = 50; ring2 = 100; ring3 = 200;
           area1 = 200; area2 = 500; area3 = 1000;
           maxWeatherPts = 5; weatherGrid = 0.5; shorelineAvoid = 50;
         } else if (minSegmentNm < 1.0 || spanNm < 3) {
-          console.log("⚡ Tryb AUTO: MALY");
           corridorNm = Math.min(0.3, maxCorridorFromSegment);
           ring1 = 100; ring2 = 250; ring3 = 500;
           area1 = 500; area2 = 1500; area3 = 4000;
           maxWeatherPts = 10; weatherGrid = 1.0; shorelineAvoid = 100;
         } else if (spanNm < 8) {
-          console.log("⚡ Tryb AUTO: SREDNI");
           corridorNm = Math.min(1.0, maxCorridorFromSegment);
           ring1 = 300; ring2 = 800; ring3 = 1500;
           area1 = 2000; area2 = 8000; area3 = 25000;
           maxWeatherPts = 20; weatherGrid = 2.0; shorelineAvoid = 150;
         } else {
-          console.log("⚡ Tryb AUTO: STANDARDOWY");
           corridorNm = Math.min(3.0, spanNm * 0.15, maxCorridorFromSegment);
           ring1 = 500; ring2 = 1500; ring3 = 3000;
           area1 = 3000; area2 = 15000; area3 = 60000;
           maxWeatherPts = 40; weatherGrid = 5.0; shorelineAvoid = 200;
         }
       } else {
-        // Użyj ręcznych ustawień
-        console.log("⚡ Tryb: RECZNY");
         corridorNm = meshSettings.corridor_nm;
         ring1 = meshSettings.ring1_m;
         ring2 = meshSettings.ring2_m;
@@ -459,10 +441,8 @@ export default function Home() {
         shorelineAvoid = meshSettings.shoreline_avoid_m;
       }
 
-      console.log(`📐 Corridor: ${corridorNm.toFixed(3)} nm`);
-
       const meshPayload = {
-        user_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6", // TODO: prawdziwy user ID
+        user_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
         yacht_id: selectedYachtId,
         points: controlPoints.map((p, idx) => ({
           lat: p.lat,
@@ -486,9 +466,6 @@ export default function Home() {
         weather_clustering_method: "kmeans"
       };
 
-      console.log("📤 Mesh payload:", meshPayload);
-
-      // Bez timeoutu - czekamy na backend
       const meshRes = await fetch(`${API_URL}/routes_mesh/mesh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -502,22 +479,19 @@ export default function Home() {
           const errJson = JSON.parse(errText);
           errorMsg = errJson.detail || errJson.message || errText;
         } catch {}
-        throw new Error(`Blad tworzenia siatki: ${errorMsg}`);
+        throw new Error(`Błąd tworzenia siatki: ${errorMsg}`);
       }
 
       const meshData = await meshRes.json();
       const meshedAreaId = meshData.meshed_area_id;
 
-      console.log("✅ Mesh utworzony:", meshedAreaId);
       setCalcStatus({
         step: 'weather',
         message: 'Pobieranie danych pogodowych...',
         meshedAreaId
       });
 
-      // ============ KROK 2: Pobieranie pogody ============
-      console.log("🔷 KROK 2: Pobieranie pogody dla mesh:", meshedAreaId);
-
+      // KROK 2: Pobieranie pogody
       const weatherRes = await fetch(`${API_URL}/weather/${meshedAreaId}/fetch-weather`, {
         method: 'POST'
       });
@@ -529,11 +503,8 @@ export default function Home() {
           const errJson = JSON.parse(errText);
           errorMsg = errJson.detail || errJson.message || errText;
         } catch {}
-        throw new Error(`Blad pobierania pogody: ${errorMsg}`);
+        throw new Error(`Błąd pobierania pogody: ${errorMsg}`);
       }
-
-      const weatherData = await weatherRes.json();
-      console.log("✅ Pogoda pobrana:", weatherData);
 
       const numVariants = useTimeWindow ? startWindow.checkCount : 1;
       setCalcStatus({
@@ -542,21 +513,15 @@ export default function Home() {
         meshedAreaId
       });
 
-      // ============ KROK 3: Obliczanie trasy ============
-      console.log("🔷 KROK 3: Obliczanie trasy...");
-
-      // Payload zgodny z TimeWindowRequest schema
+      // KROK 3: Obliczanie trasy
       let routingPayload;
-
       if (useTimeWindow) {
-        // Użyj ustawionego okna czasowego
         routingPayload = {
           start_time: new Date(startWindow.start).toISOString(),
           end_time: new Date(startWindow.end).toISOString(),
           num_checks: startWindow.checkCount
         };
       } else {
-        // Start natychmiast - aktualny czas warszawski, +1 minuta, 1 sprawdzenie
         const now = new Date();
         const oneMinuteLater = new Date(now.getTime() + 60 * 1000);
         routingPayload = {
@@ -566,9 +531,6 @@ export default function Home() {
         };
       }
 
-      console.log("📤 Routing payload:", routingPayload);
-
-      // Endpoint: /calculate-route - obliczenia mogą trwać dłużej
       const routingRes = await fetch(`${API_URL}/routing/${meshedAreaId}/calculate-route`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -577,26 +539,22 @@ export default function Home() {
 
       if (!routingRes.ok) {
         const errText = await routingRes.text();
-        // Parsuj błąd z backendu jeśli to JSON
         let errorMsg = errText;
         try {
           const errJson = JSON.parse(errText);
           errorMsg = errJson.detail || errJson.message || errText;
         } catch {}
-        throw new Error(`Blad obliczania trasy: ${errorMsg}`);
+        throw new Error(`Błąd obliczania trasy: ${errorMsg}`);
       }
 
       const routeResult = await routingRes.json();
       console.log("✅ Trasa obliczona:", routeResult);
 
-      // NIE czyść punktów kontrolnych - pokazujemy je na trasie
-
-      // Zbierz waypoints, segments i tack points dla wszystkich wariantów
+      // Zbierz waypoints i segments
       const waypointsMap: Record<string, [number, number][]> = {};
       const segmentsMap: Record<string, RouteSegment[]> = {};
       const tackPointsMap: Record<string, TackPoint[]> = {};
 
-      // Funkcja do wykrywania zwrotów/przejść na podstawie TWA
       const detectTackPoints = (segments: RouteSegment[]): TackPoint[] => {
         const points: TackPoint[] = [];
         for (let i = 1; i < segments.length; i++) {
@@ -605,12 +563,9 @@ export default function Home() {
           const prevTwa = prevSeg.twa;
           const currTwa = currSeg.twa;
 
-          // Sprawdź czy TWA zmienił znak (przeszliśmy przez wiatr)
           if ((prevTwa > 0 && currTwa < 0) || (prevTwa < 0 && currTwa > 0)) {
             let bearingChange = Math.abs(currSeg.bearing - prevSeg.bearing);
             if (bearingChange > 180) bearingChange = 360 - bearingChange;
-
-            // Tack jeśli TWA < 90, Jibe jeśli TWA > 90
             const isTack = Math.abs(prevTwa) < 90 || Math.abs(currTwa) < 90;
 
             points.push({
@@ -626,28 +581,24 @@ export default function Home() {
         return points;
       };
 
-      // Sprawdź czy response zawiera waypoints i segments
       for (const variant of routeResult.variants) {
         if (variant.waypoints_wgs84 && variant.waypoints_wgs84.length > 0) {
-          // waypoints są w formacie [lon, lat], konwertujemy na [lat, lon] dla Leaflet
           waypointsMap[variant.variant_id] = variant.waypoints_wgs84.map(
             (wp: [number, number]) => [wp[1], wp[0]] as [number, number]
           );
         }
 
-        // Pobierz segments jeśli są dostępne
         if (variant.segments && variant.segments.length > 0) {
           segmentsMap[variant.variant_id] = variant.segments;
           tackPointsMap[variant.variant_id] = detectTackPoints(variant.segments);
         }
       }
 
-      // Jeśli brak waypoints/segments w response, pobierz z calculated-route
+      // Fallback - pobierz z calculated-route
       if (Object.keys(waypointsMap).length === 0) {
         const waypointsRes = await fetch(`${API_URL}/routing/${meshedAreaId}/calculated-route`);
         if (waypointsRes.ok) {
           const waypointsData = await waypointsRes.json();
-          console.log("📍 Waypoints from calculated-route:", waypointsData);
 
           if (waypointsData.data?.route && routeResult.best_variant) {
             const routeData = waypointsData.data.route;
@@ -660,7 +611,6 @@ export default function Home() {
             }
 
             if (routeData.segments && routeData.segments.length > 0) {
-              // Konwertuj segments z backendu
               const segments: RouteSegment[] = routeData.segments.map((seg: any) => ({
                 from: { lat: seg.from.lat, lon: seg.from.lon },
                 to: { lat: seg.to.lat, lon: seg.to.lon },
@@ -681,15 +631,10 @@ export default function Home() {
         }
       }
 
-      console.log("📍 Waypoints map:", waypointsMap);
-      console.log("📍 Segments map:", segmentsMap);
-      console.log("📍 Tack points map:", tackPointsMap);
-
       setVariantWaypoints(waypointsMap);
       setVariantSegments(segmentsMap);
       setVariantTackPoints(tackPointsMap);
 
-      // Zaznacz wszystkie warianty które mają waypoints
       const variantIdsWithWaypoints = Object.keys(waypointsMap);
       if (variantIdsWithWaypoints.length > 0) {
         setSelectedVariantIds(variantIdsWithWaypoints);
@@ -704,7 +649,6 @@ export default function Home() {
         routeResult
       });
 
-      // Otwórz sekcję wyników
       setExpandedSection('results');
 
     } catch (err) {
@@ -719,7 +663,32 @@ export default function Home() {
     }
   };
 
-  const toggleSection = (section: 'yachts' | 'route' | 'startWindow' | 'results' | 'settings') => {
+  // === ANIMATION HANDLERS ===
+  const handleAnimationToggle = () => {
+    if (isAnimating) {
+      setIsAnimating(false);
+    } else {
+      setIsAnimating(true);
+      setShowAnimationPanel(true);
+    }
+  };
+
+  const handleAnimationStop = () => {
+    setIsAnimating(false);
+    setAnimationState(null);
+    setActiveSegmentIndex(0);
+  };
+
+  const handlePositionChange = useCallback((position: [number, number], bearing: number, progress: number) => {
+    setAnimationState({ position, bearing, progress });
+  }, []);
+
+  const handleSegmentChange = useCallback((segmentIndex: number, segment: RouteSegment) => {
+    setActiveSegmentIndex(segmentIndex);
+  }, []);
+
+  // Helper functions
+  const toggleSection = (section: 'yachts' | 'route' | 'startWindow' | 'results' | 'meshSettings' | 'animation') => {
     setExpandedSection(expandedSection === section ? null : section);
   };
 
@@ -728,10 +697,8 @@ export default function Home() {
     return y ? y.name : "Wybierz jacht";
   };
 
-  // Helper: czy wszystko gotowe do obliczenia
   const canCalculate = selectedYachtId && controlPoints.length >= 2 && !isCalculating;
 
-  // Helper: progress indicator
   const getStepProgress = () => {
     switch(calcStatus.step) {
       case 'mesh': return 33;
@@ -742,14 +709,12 @@ export default function Home() {
     }
   };
 
-  // Helper: format duration
   const formatDuration = (hours: number): string => {
     const h = Math.floor(hours);
     const m = Math.round((hours - h) * 60);
     return h > 0 ? `${h}h ${m}m` : `${m}m`;
   };
 
-  // Helper: format datetime
   const formatDateTime = (isoString: string): string => {
     const date = new Date(isoString);
     return date.toLocaleString('pl-PL', {
@@ -760,7 +725,6 @@ export default function Home() {
     });
   };
 
-  // Helper: difficulty color
   const getDifficultyColor = (level: string): string => {
     switch (level?.toLowerCase()) {
       case 'easy': return 'text-green-600 bg-green-100';
@@ -772,7 +736,6 @@ export default function Home() {
     }
   };
 
-  // Helper: get point type icon and label
   const getPointTypeInfo = (type: ControlPointType) => {
     switch (type) {
       case 'START': return { icon: '🟢', label: 'Start', color: 'text-green-600' };
@@ -784,34 +747,15 @@ export default function Home() {
     }
   };
 
-  // Handler: toggle variant selection
   const handleVariantToggle = async (variantId: string) => {
     const isSelected = selectedVariantIds.includes(variantId);
-
     if (isSelected) {
-      // Odznacz
       setSelectedVariantIds(prev => prev.filter(id => id !== variantId));
     } else {
-      // Zaznacz i pobierz waypoints jeśli nie ma
       setSelectedVariantIds(prev => [...prev, variantId]);
-
-      // Pobierz waypoints dla tego wariantu jeśli ich nie mamy
-      if (!variantWaypoints[variantId] && calcStatus.meshedAreaId) {
-        try {
-          const res = await fetch(`${API_URL}/routing/${calcStatus.meshedAreaId}/variants`);
-          if (res.ok) {
-            const data = await res.json();
-            // TODO: Backend powinien zwracać waypoints per variant
-            // Na razie używamy calculated-route dla best variant
-          }
-        } catch (err) {
-          console.error('Error fetching variant waypoints:', err);
-        }
-      }
     }
   };
 
-  // Handler: select all variants
   const handleSelectAllVariants = () => {
     if (calcStatus.routeResult) {
       const allIds = calcStatus.routeResult.variants.map(v => v.variant_id);
@@ -819,7 +763,6 @@ export default function Home() {
     }
   };
 
-  // Handler: start new route calculation
   const handleNewRoute = () => {
     setCalcStatus({ step: 'idle', message: '', routeResult: null });
     setSelectedVariantIds([]);
@@ -829,14 +772,16 @@ export default function Home() {
     setControlPoints([]);
     setEditingPointIndex(null);
     setExpandedSection('yachts');
+    setIsAnimating(false);
+    setAnimationState(null);
+    setShowAnimationPanel(false);
   };
 
-  // Handler: otwórz pełną wizualizację
-  const handleViewVisualization = (meshedAreaId: string) => {
-    window.open(`${API_URL}/visualise/${meshedAreaId}/route/view?show_all_variants=false`, '_blank');
-  };
+  const handleSplashFinish = useCallback(() => {
+    setShowSplash(false);
+  }, []);
 
-  // Oblicz trasy do wyświetlenia na mapie (z segmentami)
+  // Calculated routes for map
   const calculatedRoutes = selectedVariantIds
     .filter(id => variantWaypoints[id])
     .map((id, index) => ({
@@ -845,12 +790,11 @@ export default function Home() {
       variantIndex: index
     }));
 
-  // Handler: zamknij splash screen
-  const handleSplashFinish = useCallback(() => {
-    setShowSplash(false);
-  }, []);
+  // Get segments for animation (from first selected variant with segments)
+  const animationSegments = selectedVariantIds.length > 0 && variantSegments[selectedVariantIds[0]]
+    ? variantSegments[selectedVariantIds[0]]
+    : [];
 
-  // Pokaż splash screen
   if (showSplash) {
     return <SplashScreen onFinish={handleSplashFinish} minDuration={2500} />;
   }
@@ -862,8 +806,22 @@ export default function Home() {
       {/* HEADER */}
       <div className="h-16 bg-slate-900 text-white flex items-center px-6 justify-between z-10 shadow-lg border-b border-slate-700">
         <h1 className="font-semibold text-lg tracking-wide">Sailing Route Calculator</h1>
-        <div className="text-xs text-slate-400">
+        <div className="flex items-center gap-4">
+          {/* Wind barbs toggle */}
+          {calcStatus.routeResult && (
+            <label className="flex items-center gap-2 text-xs cursor-pointer">
+              <input
+                type="checkbox"
+                checked={showWindBarbs}
+                onChange={e => setShowWindBarbs(e.target.checked)}
+                className="w-3 h-3"
+              />
+              <span className="text-slate-400">Barby wiatru</span>
+            </label>
+          )}
+          <div className="text-xs text-slate-400">
             Jacht: <span className="text-white font-bold ml-1">{getActiveYachtName()}</span>
+          </div>
         </div>
       </div>
 
@@ -873,7 +831,29 @@ export default function Home() {
           onMapClick={addPoint}
           calculatedRoutes={calculatedRoutes}
           isRouteCalculated={!!calcStatus.routeResult}
+          animationState={animationState}
+          showWindBarbs={showWindBarbs}
+          activeSegmentIndex={isAnimating ? activeSegmentIndex : undefined}
         />
+
+        {/* WIND BARB LEGEND */}
+        {calcStatus.routeResult && showWindBarbs && (
+          <WindBarbLegend className="absolute bottom-4 left-4 z-[1000]" />
+        )}
+
+        {/* ANIMATION PANEL - floating on map */}
+        {showAnimationPanel && animationSegments.length > 0 && (
+          <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 z-[1001] w-[500px]">
+            <RouteAnimation
+              segments={animationSegments}
+              isPlaying={isAnimating}
+              onPlayPause={handleAnimationToggle}
+              onStop={handleAnimationStop}
+              onPositionChange={handlePositionChange}
+              onSegmentChange={handleSegmentChange}
+            />
+          </div>
+        )}
 
         {/* SIDEBAR */}
         <div className="absolute top-4 right-4 bg-white/95 backdrop-blur-sm rounded-lg shadow-xl z-[1000] w-96 max-h-[85vh] flex flex-col border border-slate-200 transition-all overflow-hidden">
@@ -889,10 +869,10 @@ export default function Home() {
             {/* SUCCESS MESSAGE */}
             {calcStatus.step === 'done' && calcStatus.routeResult && (
               <div className="bg-green-100 border-b border-green-300 text-green-800 px-4 py-3 text-xs">
-                <div className="font-bold mb-1">Trasa obliczona pomyslnie!</div>
+                <div className="font-bold mb-1">Trasa obliczona pomyślnie!</div>
                 <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
-                  <div>Wariantow: <span className="font-medium">{calcStatus.routeResult.variants_count}</span></div>
-                  <div>Trudnosc: <span className="font-medium">{calcStatus.routeResult.difficulty.level}</span></div>
+                  <div>Wariantów: <span className="font-medium">{calcStatus.routeResult.variants_count}</span></div>
+                  <div>Trudność: <span className="font-medium">{calcStatus.routeResult.difficulty.level}</span></div>
                   {calcStatus.routeResult.best_variant && (
                     <>
                       <div>Najlepszy czas: <span className="font-medium">{formatDuration(calcStatus.routeResult.best_variant.total_time_hours)}</span></div>
@@ -903,7 +883,7 @@ export default function Home() {
               </div>
             )}
 
-            {/* SEKCJA 1: JACHTY */}
+            {/* SEKCJA: JACHTY */}
             <div className="border-b border-slate-200 flex flex-col">
                 <button onClick={() => toggleSection('yachts')} className="p-4 flex justify-between bg-slate-50 hover:bg-slate-100">
                     <span className="font-bold text-slate-800">Jachty</span>
@@ -914,7 +894,6 @@ export default function Home() {
                     <div className="bg-white">
                         {!isAddingYacht ? (
                             <>
-                                {/* ZAKŁADKI */}
                                 <div className="flex border-b border-slate-200">
                                     <button
                                         onClick={() => setActiveTab('presets')}
@@ -930,7 +909,6 @@ export default function Home() {
                                     </button>
                                 </div>
 
-                                {/* LISTA JACHTÓW */}
                                 <div className="max-h-[200px] overflow-y-auto custom-scrollbar p-3 space-y-2">
                                     {(activeTab === 'presets' ? presetYachts : myYachts).length === 0 && (
                                         <p className="text-xs text-center text-slate-400 py-4">
@@ -954,9 +932,7 @@ export default function Home() {
                                                 <div className="font-bold text-sm text-slate-800">{yacht.name}</div>
                                                 <div className="text-[10px] text-slate-500">{yacht.yacht_type} • L:{yacht.length}ft • Max:{yacht.max_speed}kt</div>
                                             </div>
-
                                             {selectedYachtId === yacht.id && <div className="text-blue-600 text-lg font-bold">✓</div>}
-
                                             {activeTab === 'my' && (
                                                 <button
                                                     onClick={(e) => handleDeleteYacht(e, yacht.id)}
@@ -979,17 +955,14 @@ export default function Home() {
                                 )}
                             </>
                         ) : (
-                            /* FORMULARZ DODAWANIA */
                             <div className="p-4 space-y-3 bg-slate-50">
                                 <h4 className="font-bold text-sm text-slate-800 border-b pb-2">Nowy Jacht</h4>
-
                                 <div>
                                     <label className="text-[10px] text-slate-500 uppercase font-bold">Nazwa *</label>
                                     <input type="text" className="w-full border p-1.5 text-sm rounded focus:ring-1 focus:ring-blue-500 outline-none text-slate-800 placeholder:text-slate-400"
                                         placeholder="Np. Mój Jacht"
                                         value={newYachtData.name} onChange={e => setNewYachtData({...newYachtData, name: e.target.value})} />
                                 </div>
-
                                 <div>
                                     <label className="text-[10px] text-slate-500 uppercase font-bold">Typ</label>
                                     <select
@@ -1005,7 +978,6 @@ export default function Home() {
                                         <option value="open_60">Open 60</option>
                                     </select>
                                 </div>
-
                                 <div className="grid grid-cols-2 gap-2">
                                     <div>
                                         <label className="text-[10px] text-slate-500 uppercase font-bold">Długość (ft)</label>
@@ -1038,7 +1010,6 @@ export default function Home() {
                                              value={newYachtData.max_wind_speed} onChange={e => setNewYachtData({...newYachtData, max_wind_speed: parseFloat(e.target.value) || 0})} />
                                     </div>
                                 </div>
-
                                 <div className="flex items-center gap-4 pt-1">
                                     <label className="flex items-center gap-1 text-xs text-slate-600">
                                         <input type="checkbox" checked={newYachtData.has_spinnaker} onChange={e => setNewYachtData({...newYachtData, has_spinnaker: e.target.checked})} />
@@ -1049,7 +1020,6 @@ export default function Home() {
                                         Genaker
                                     </label>
                                 </div>
-
                                 <div className="flex gap-2 pt-2">
                                     <button onClick={() => setIsAddingYacht(false)} className="flex-1 py-2 bg-white border border-slate-300 text-slate-600 rounded text-xs font-bold hover:bg-slate-100">Anuluj</button>
                                     <button
@@ -1066,7 +1036,7 @@ export default function Home() {
                 )}
             </div>
 
-            {/* SEKCJA 2: TRASA (Punkty kontrolne) */}
+            {/* SEKCJA: TRASA */}
             <div className="border-b border-slate-200">
                 <button onClick={() => toggleSection('route')} className="p-4 w-full flex justify-between bg-slate-50 hover:bg-slate-100">
                     <span className="font-bold text-slate-800">Trasa ({controlPoints.length} pkt)</span>
@@ -1076,9 +1046,7 @@ export default function Home() {
                    <div className="p-3 bg-white max-h-[250px] overflow-y-auto custom-scrollbar">
                       {calcStatus.routeResult ? (
                         <div className="space-y-2">
-                          <p className="text-xs text-slate-500 italic mb-2">
-                            Trasa obliczona. Punkty kontrolne:
-                          </p>
+                          <p className="text-xs text-slate-500 italic mb-2">Trasa obliczona. Punkty kontrolne:</p>
                           {controlPoints.map((p, i) => {
                             const typeInfo = getPointTypeInfo(p.type);
                             return (
@@ -1091,22 +1059,19 @@ export default function Home() {
                                   </span>
                                 </div>
                                 {p.desc && <div className="text-slate-600 mt-1 pl-5">{p.desc}</div>}
-                                {p.width && <div className="text-slate-400 mt-0.5 pl-5">Szer. bramki: {p.width}m</div>}
                               </div>
                             );
                           })}
                         </div>
                       ) : controlPoints.length === 0 ? (
-                        <p className="text-xs text-slate-400 italic">Kliknij na mapie by dodac punkty kontrolne.</p>
+                        <p className="text-xs text-slate-400 italic">Kliknij na mapie by dodać punkty kontrolne.</p>
                       ) : (
                         <div className="space-y-2">
                           {controlPoints.map((p, i) => {
                             const typeInfo = getPointTypeInfo(p.type);
                             const isEditing = editingPointIndex === i;
-
                             return (
                               <div key={i} className={`rounded border ${isEditing ? 'border-blue-300 bg-blue-50' : 'border-slate-200 bg-slate-50'} p-2`}>
-                                {/* Header */}
                                 <div className="flex justify-between items-center">
                                   <div className="flex items-center gap-2">
                                     <span>{typeInfo.icon}</span>
@@ -1119,94 +1084,72 @@ export default function Home() {
                                     <button
                                       onClick={() => setEditingPointIndex(isEditing ? null : i)}
                                       className={`text-xs px-1.5 py-0.5 rounded ${isEditing ? 'bg-blue-500 text-white' : 'bg-slate-200 text-slate-600 hover:bg-slate-300'}`}
-                                      title="Edytuj"
                                     >
                                       {isEditing ? '✓' : '✎'}
                                     </button>
                                     <button
                                       onClick={() => removePoint(i)}
                                       className="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-600 hover:bg-red-200"
-                                      title="Usun"
                                     >
                                       ×
                                     </button>
                                   </div>
                                 </div>
-
-                              {/* Edit form */}
-                              {isEditing && (
+                                {isEditing && (
                                   <div className="mt-2 pt-2 border-t border-blue-200 space-y-2">
-                                    {/* Typ punktu */}
                                     <div>
                                       <label className="text-[10px] text-slate-500 block mb-1">Typ punktu</label>
                                       <select
-                                          value={p.type}
-                                          onChange={e => updatePoint(i, {type: e.target.value as ControlPointType})}
-                                          className="w-full text-xs border rounded px-2 py-1 text-slate-800"
-                                          disabled={i === 0 || i === controlPoints.length - 1}
+                                        value={p.type}
+                                        onChange={e => updatePoint(i, {type: e.target.value as ControlPointType})}
+                                        className="w-full text-xs border rounded px-2 py-1 text-slate-800"
+                                        disabled={i === 0 || i === controlPoints.length - 1}
                                       >
-                                        {/* Logika wyświetlania opcji zależna od pozycji punktu */}
                                         {i === 0 ? (
-                                            <option value="START">Start</option>
+                                          <option value="START">Start</option>
                                         ) : i === controlPoints.length - 1 ? (
-                                            <option value="FINISH">Meta</option>
+                                          <option value="FINISH">Meta</option>
                                         ) : (
-                                            <>
-                                              <option value="WAYPOINT">Punkt nawigacyjny</option>
-                                              <option value="MARK">Boja/Znak</option>
-                                              <option value="GATE">Bramka</option>
-                                            </>
+                                          <>
+                                            <option value="WAYPOINT">Punkt nawigacyjny</option>
+                                            <option value="MARK">Boja/Znak</option>
+                                            <option value="GATE">Bramka</option>
+                                          </>
                                         )}
                                       </select>
                                     </div>
-
-                                    {/* Szerokość bramki */}
                                     {(p.type === 'GATE' || p.type === 'START' || p.type === 'FINISH') && (
-                                        <div>
-                                          <label className="text-[10px] text-slate-500 block mb-1">Szerokosc (m)</label>
-                                          <input
-                                              type="number"
-                                              min="0"
-                                              value={p.width || ''}
-                                              onChange={e => {
-                                                const val = parseFloat(e.target.value);
-                                                const safeValue = val < 0 ? 0 : val;
-
-                                                updatePoint(i, {
-                                                  width: isNaN(safeValue) ? undefined : safeValue
-                                                });
-                                              }}
-                                              placeholder="np. 50"
-                                              className="w-full text-xs border rounded px-2 py-1 text-slate-800 placeholder:text-slate-400"
-                                          />
-                                        </div>
-                                    )}
-
-                                    {/* Opis */}
-                                    <div>
-                                      <label className="text-[10px] text-slate-500 block mb-1">Opis
-                                        (opcjonalnie)</label>
-                                      <input
-                                          type="text"
-                                          value={p.desc || ''}
-                                          onChange={e => updatePoint(i, {desc: e.target.value || undefined})}
-                                          placeholder="np. Boja startowa A"
+                                      <div>
+                                        <label className="text-[10px] text-slate-500 block mb-1">Szerokość (m)</label>
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          value={p.width || ''}
+                                          onChange={e => updatePoint(i, { width: parseFloat(e.target.value) || undefined })}
+                                          placeholder="np. 50"
                                           className="w-full text-xs border rounded px-2 py-1 text-slate-800 placeholder:text-slate-400"
+                                        />
+                                      </div>
+                                    )}
+                                    <div>
+                                      <label className="text-[10px] text-slate-500 block mb-1">Opis (opcjonalnie)</label>
+                                      <input
+                                        type="text"
+                                        value={p.desc || ''}
+                                        onChange={e => updatePoint(i, { desc: e.target.value || undefined })}
+                                        placeholder="np. Boja startowa A"
+                                        className="w-full text-xs border rounded px-2 py-1 text-slate-800 placeholder:text-slate-400"
                                       />
                                     </div>
                                   </div>
-                              )}
+                                )}
                               </div>
                             );
                           })}
-
                           {controlPoints.length > 0 && (
-                              <button
-                                  onClick={() => setControlPoints([])}
-                                  className="text-xs text-red-500 mt-2 hover:underline"
-                              >
-                                Wyczysc wszystkie punkty
-                              </button>
+                            <button onClick={() => setControlPoints([])} className="text-xs text-red-500 mt-2 hover:underline">
+                              Wyczyść wszystkie punkty
+                            </button>
                           )}
                         </div>
                       )}
@@ -1214,340 +1157,275 @@ export default function Home() {
                 )}
             </div>
 
-          {/* SEKCJA 2.5: USTAWIENIA SIATKI */}
-          <div className="border-b border-slate-200">
-            <button onClick={() => toggleSection('meshSettings')}
-                    className="p-4 w-full flex justify-between bg-slate-50 hover:bg-slate-100">
-                    <span className="font-bold text-slate-800">Ustawienia Siatki</span>
-                    <span className="text-slate-400">{expandedSection === 'meshSettings' ? '▲' : '▼'}</span>
-                </button>
-                {expandedSection === 'meshSettings' && (
-                   <div className="p-3 bg-white space-y-3">
-                      {/* Auto/Manual toggle */}
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={useAutoMesh}
-                          onChange={e => setUseAutoMesh(e.target.checked)}
-                          className="w-4 h-4 text-blue-600 rounded"
-                        />
-                        <span className="text-sm text-slate-700 font-medium">Automatyczne parametry</span>
-                      </label>
-
-                      {useAutoMesh ? (
-                        <div className="bg-green-50 border border-green-200 rounded p-2 text-xs text-green-700">
-                          Parametry siatki beda dostosowane automatycznie do wielkosci trasy.
-                        </div>
-                      ) : (
-                        <div className="space-y-2">
-                          <div className="grid grid-cols-2 gap-2">
-                            <div>
-                              <label className="text-[10px] text-slate-500 block mb-1">Korytarz (nm)</label>
-                              <input
-                                type="number"
-                                step="0.1"
-                                value={meshSettings.corridor_nm}
-                                onChange={e => setMeshSettings(s => ({ ...s, corridor_nm: Number(e.target.value) }))}
-                                className="w-full text-xs border rounded px-2 py-1 text-slate-800"
-                              />
-                            </div>
-                            <div>
-                              <label className="text-[10px] text-slate-500 block mb-1">Unikaj brzegu (m)</label>
-                              <input
-                                type="number"
-                                value={meshSettings.shoreline_avoid_m}
-                                onChange={e => setMeshSettings(s => ({ ...s, shoreline_avoid_m: Number(e.target.value) }))}
-                                className="w-full text-xs border rounded px-2 py-1 text-slate-800"
-                              />
-                            </div>
-                          </div>
-
-                          <div className="grid grid-cols-3 gap-2">
-                            <div>
-                              <label className="text-[10px] text-slate-500 block mb-1">Ring 1 (m)</label>
-                              <input
-                                type="number"
-                                value={meshSettings.ring1_m}
-                                onChange={e => setMeshSettings(s => ({ ...s, ring1_m: Number(e.target.value) }))}
-                                className="w-full text-xs border rounded px-2 py-1 text-slate-800"
-                              />
-                            </div>
-                            <div>
-                              <label className="text-[10px] text-slate-500 block mb-1">Ring 2 (m)</label>
-                              <input
-                                type="number"
-                                value={meshSettings.ring2_m}
-                                onChange={e => setMeshSettings(s => ({ ...s, ring2_m: Number(e.target.value) }))}
-                                className="w-full text-xs border rounded px-2 py-1 text-slate-800"
-                              />
-                            </div>
-                            <div>
-                              <label className="text-[10px] text-slate-500 block mb-1">Ring 3 (m)</label>
-                              <input
-                                type="number"
-                                value={meshSettings.ring3_m}
-                                onChange={e => setMeshSettings(s => ({ ...s, ring3_m: Number(e.target.value) }))}
-                                className="w-full text-xs border rounded px-2 py-1 text-slate-800"
-                              />
-                            </div>
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-2">
-                            <div>
-                              <label className="text-[10px] text-slate-500 block mb-1">Max pkt pogody</label>
-                              <input
-                                type="number"
-                                value={meshSettings.max_weather_points}
-                                onChange={e => setMeshSettings(s => ({ ...s, max_weather_points: Number(e.target.value) }))}
-                                className="w-full text-xs border rounded px-2 py-1 text-slate-800"
-                              />
-                            </div>
-                            <div>
-                              <label className="text-[10px] text-slate-500 block mb-1">Grid pogody (km)</label>
-                              <input
-                                type="number"
-                                step="0.5"
-                                value={meshSettings.weather_grid_km}
-                                onChange={e => setMeshSettings(s => ({ ...s, weather_grid_km: Number(e.target.value) }))}
-                                className="w-full text-xs border rounded px-2 py-1 text-slate-800"
-                              />
-                            </div>
-                          </div>
-
-                          <button
-                            onClick={() => setMeshSettings(DEFAULT_MESH_SETTINGS)}
-                            className="text-xs text-blue-500 hover:underline"
-                          >
-                            Przywroc domyslne
-                          </button>
-                        </div>
-                      )}
-                   </div>
-                )}
-            </div>
-
-            {/* SEKCJA 3: OKNO STARTOWE */}
+            {/* SEKCJA: USTAWIENIA SIATKI */}
             <div className="border-b border-slate-200">
-                <button onClick={() => toggleSection('startWindow')} className="p-4 w-full flex justify-between bg-slate-50 hover:bg-slate-100">
-                    <span className="font-bold text-slate-800">Okno Startowe</span>
-                    <span className="text-slate-400">{expandedSection === 'startWindow' ? '▲' : '▼'}</span>
-                </button>
-                {expandedSection === 'startWindow' && (
-                   <div className="p-4 bg-white space-y-3">
-                      {/* Checkbox do włączenia okna czasowego */}
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={useTimeWindow}
-                          onChange={e => setUseTimeWindow(e.target.checked)}
-                          className="w-4 h-4 text-blue-600 rounded"
-                        />
-                        <span className="text-sm text-slate-700 font-medium">Ustaw okno czasowe startu</span>
-                      </label>
-
-                      {!useTimeWindow ? (
-                        <div className="bg-slate-50 border border-slate-200 rounded p-3 text-xs text-slate-600">
-                          <p>Start zostanie ustawiony na <strong>aktualną godzinę (Warszawa)</strong> z jednym sprawdzeniem.</p>
+              <button onClick={() => toggleSection('meshSettings')} className="p-4 w-full flex justify-between bg-slate-50 hover:bg-slate-100">
+                <span className="font-bold text-slate-800">Ustawienia Siatki</span>
+                <span className="text-slate-400">{expandedSection === 'meshSettings' ? '▲' : '▼'}</span>
+              </button>
+              {expandedSection === 'meshSettings' && (
+                <div className="p-3 bg-white space-y-3">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={useAutoMesh}
+                      onChange={e => setUseAutoMesh(e.target.checked)}
+                      className="w-4 h-4 text-blue-600 rounded"
+                    />
+                    <span className="text-sm text-slate-700 font-medium">Automatyczne parametry</span>
+                  </label>
+                  {useAutoMesh ? (
+                    <div className="bg-green-50 border border-green-200 rounded p-2 text-xs text-green-700">
+                      Parametry siatki będą dostosowane automatycznie do wielkości trasy.
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[10px] text-slate-500 block mb-1">Korytarz (nm)</label>
+                          <input
+                            type="number" step="0.1"
+                            value={meshSettings.corridor_nm}
+                            onChange={e => setMeshSettings(s => ({ ...s, corridor_nm: Number(e.target.value) }))}
+                            className="w-full text-xs border rounded px-2 py-1 text-slate-800"
+                          />
                         </div>
-                      ) : (
-                        <>
-                          <div>
-                            <label className="text-[10px] text-slate-500 uppercase font-bold block mb-1">
-                              Pierwszy możliwy start
-                            </label>
-                            <input
-                              type="datetime-local"
-                              className="w-full border p-2 text-sm rounded focus:ring-1 focus:ring-blue-500 outline-none text-slate-800"
-                              value={startWindow.start}
-                              onChange={e => setStartWindow({...startWindow, start: e.target.value})}
-                            />
-                          </div>
-
-                          <div>
-                            <label className="text-[10px] text-slate-500 uppercase font-bold block mb-1">
-                              Zamknięcie okna
-                            </label>
-                            <input
-                              type="datetime-local"
-                              className="w-full border p-2 text-sm rounded focus:ring-1 focus:ring-blue-500 outline-none text-slate-800"
-                              value={startWindow.end}
-                              onChange={e => setStartWindow({...startWindow, end: e.target.value})}
-                            />
-                          </div>
-
-                          <div>
-                            <label className="text-[10px] text-slate-500 uppercase font-bold block mb-1">
-                              Liczba sprawdzeń: <span className="text-blue-600">{startWindow.checkCount}</span>
-                            </label>
-                            <input
-                              type="range"
-                              min="1"
-                              max="10"
-                              className="w-full"
-                              value={startWindow.checkCount}
-                              onChange={e => setStartWindow({...startWindow, checkCount: parseInt(e.target.value)})}
-                            />
-                            <div className="flex justify-between text-[9px] text-slate-400 mt-1">
-                              <span>1</span>
-                              <span>Więcej = dokładniej, ale wolniej</span>
-                              <span>10</span>
-                            </div>
-                          </div>
-
-                          <div className="bg-blue-50 border border-blue-200 rounded p-2 text-xs text-blue-800">
-                            <strong>Podsumowanie:</strong><br/>
-                            Od: {new Date(startWindow.start).toLocaleString('pl-PL')}<br/>
-                            Do: {new Date(startWindow.end).toLocaleString('pl-PL')}<br/>
-                            Sprawdzeń: {startWindow.checkCount} wariantów startu
-                          </div>
-                        </>
-                      )}
-                   </div>
-                )}
+                        <div>
+                          <label className="text-[10px] text-slate-500 block mb-1">Unikaj brzegu (m)</label>
+                          <input
+                            type="number"
+                            value={meshSettings.shoreline_avoid_m}
+                            onChange={e => setMeshSettings(s => ({ ...s, shoreline_avoid_m: Number(e.target.value) }))}
+                            className="w-full text-xs border rounded px-2 py-1 text-slate-800"
+                          />
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setMeshSettings(DEFAULT_MESH_SETTINGS)}
+                        className="text-xs text-blue-500 hover:underline"
+                      >
+                        Przywróć domyślne
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
-            {/* SEKCJA 4: WYNIKI TRASY - pokazuje się po obliczeniu */}
+            {/* SEKCJA: OKNO STARTOWE */}
+            <div className="border-b border-slate-200">
+              <button onClick={() => toggleSection('startWindow')} className="p-4 w-full flex justify-between bg-slate-50 hover:bg-slate-100">
+                <span className="font-bold text-slate-800">Okno Startowe</span>
+                <span className="text-slate-400">{expandedSection === 'startWindow' ? '▲' : '▼'}</span>
+              </button>
+              {expandedSection === 'startWindow' && (
+                <div className="p-4 bg-white space-y-3">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={useTimeWindow}
+                      onChange={e => setUseTimeWindow(e.target.checked)}
+                      className="w-4 h-4 text-blue-600 rounded"
+                    />
+                    <span className="text-sm text-slate-700 font-medium">Ustaw okno czasowe startu</span>
+                  </label>
+                  {!useTimeWindow ? (
+                    <div className="bg-slate-50 border border-slate-200 rounded p-3 text-xs text-slate-600">
+                      <p>Start zostanie ustawiony na <strong>aktualną godzinę (Warszawa)</strong> z jednym sprawdzeniem.</p>
+                    </div>
+                  ) : (
+                    <>
+                      <div>
+                        <label className="text-[10px] text-slate-500 uppercase font-bold block mb-1">Pierwszy możliwy start</label>
+                        <input
+                          type="datetime-local"
+                          className="w-full border p-2 text-sm rounded focus:ring-1 focus:ring-blue-500 outline-none text-slate-800"
+                          value={startWindow.start}
+                          onChange={e => setStartWindow({...startWindow, start: e.target.value})}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-slate-500 uppercase font-bold block mb-1">Zamknięcie okna</label>
+                        <input
+                          type="datetime-local"
+                          className="w-full border p-2 text-sm rounded focus:ring-1 focus:ring-blue-500 outline-none text-slate-800"
+                          value={startWindow.end}
+                          onChange={e => setStartWindow({...startWindow, end: e.target.value})}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-slate-500 uppercase font-bold block mb-1">
+                          Liczba sprawdzeń: <span className="text-blue-600">{startWindow.checkCount}</span>
+                        </label>
+                        <input
+                          type="range" min="1" max="10"
+                          className="w-full"
+                          value={startWindow.checkCount}
+                          onChange={e => setStartWindow({...startWindow, checkCount: parseInt(e.target.value)})}
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* SEKCJA: WYNIKI + ANIMACJA */}
             {calcStatus.routeResult && (
-            <div className="border-b border-slate-200">
+              <div className="border-b border-slate-200">
                 <button onClick={() => toggleSection('results')} className="p-4 w-full flex justify-between bg-green-50 hover:bg-green-100">
-                    <span className="font-bold text-green-800">Wyniki ({calcStatus.routeResult.variants_count} wariantow)</span>
-                    <span className="text-green-600">{expandedSection === 'results' ? '▲' : '▼'}</span>
+                  <span className="font-bold text-green-800">Wyniki ({calcStatus.routeResult.variants_count} wariantów)</span>
+                  <span className="text-green-600">{expandedSection === 'results' ? '▲' : '▼'}</span>
                 </button>
                 {expandedSection === 'results' && (
-                   <div className="bg-white max-h-[350px] overflow-y-auto">
-                      {/* Summary */}
-                      <div className="p-3 bg-green-50 border-b text-xs">
-                        <div className="flex justify-between">
-                          <span>Trudność: <strong className={getDifficultyColor(calcStatus.routeResult.difficulty.level)}>{calcStatus.routeResult.difficulty.level}</strong></span>
-                          <span>Score: {calcStatus.routeResult.difficulty.overall_score}</span>
-                        </div>
+                  <div className="bg-white max-h-[350px] overflow-y-auto">
+                    {/* Animation button */}
+                    {animationSegments.length > 0 && (
+                      <div className="p-3 bg-gradient-to-r from-blue-50 to-cyan-50 border-b">
+                        <AnimationToggleButton
+                          isAnimating={isAnimating || showAnimationPanel}
+                          onClick={() => {
+                            if (showAnimationPanel) {
+                              setShowAnimationPanel(false);
+                              setIsAnimating(false);
+                              setAnimationState(null);
+                            } else {
+                              setShowAnimationPanel(true);
+                            }
+                          }}
+                          disabled={animationSegments.length === 0}
+                        />
                       </div>
+                    )}
 
-                      {/* Variants list */}
-                      <div className="p-2 space-y-2">
-                        {calcStatus.routeResult.variants.map((variant, idx) => (
-                          <div
-                            key={variant.variant_id}
-                            onClick={() => handleVariantToggle(variant.variant_id)}
-                            className={`
-                              p-3 rounded border cursor-pointer transition-all
-                              ${selectedVariantIds.includes(variant.variant_id) 
-                                ? 'border-green-500 bg-green-50 shadow-sm' 
-                                : 'border-slate-200 hover:border-green-300'}
-                            `}
-                          >
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <input
-                                  type="checkbox"
-                                  checked={selectedVariantIds.includes(variant.variant_id)}
-                                  onChange={() => {}}
-                                  className="w-4 h-4 text-green-600"
-                                />
-                                <div>
-                                  <div className="font-bold text-sm text-slate-800 flex items-center gap-1">
-                                    {formatDateTime(variant.departure_time)}
-                                    {variant.is_best && (
-                                      <span className="text-[10px] bg-green-500 text-white px-1.5 py-0.5 rounded">BEST</span>
-                                    )}
-                                  </div>
-                                  <div className="text-[10px] text-slate-500">
-                                    {formatDuration(variant.total_time_hours)} • {variant.total_distance_nm.toFixed(1)} nm • {variant.average_speed_knots.toFixed(1)} kt
-                                  </div>
+                    {/* Summary */}
+                    <div className="p-3 bg-green-50 border-b text-xs">
+                      <div className="flex justify-between">
+                        <span>Trudność: <strong className={getDifficultyColor(calcStatus.routeResult.difficulty.level)}>{calcStatus.routeResult.difficulty.level}</strong></span>
+                        <span>Score: {calcStatus.routeResult.difficulty.overall_score}</span>
+                      </div>
+                    </div>
+
+                    {/* Variants list */}
+                    <div className="p-2 space-y-2">
+                      {calcStatus.routeResult.variants.map((variant, idx) => (
+                        <div
+                          key={variant.variant_id}
+                          onClick={() => handleVariantToggle(variant.variant_id)}
+                          className={`
+                            p-3 rounded border cursor-pointer transition-all
+                            ${selectedVariantIds.includes(variant.variant_id) 
+                              ? 'border-green-500 bg-green-50 shadow-sm' 
+                              : 'border-slate-200 hover:border-green-300'}
+                          `}
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={selectedVariantIds.includes(variant.variant_id)}
+                                onChange={() => {}}
+                                className="w-4 h-4 text-green-600"
+                              />
+                              <div>
+                                <div className="font-bold text-sm text-slate-800 flex items-center gap-1">
+                                  {formatDateTime(variant.departure_time)}
+                                  {variant.is_best && (
+                                    <span className="text-[10px] bg-green-500 text-white px-1.5 py-0.5 rounded">BEST</span>
+                                  )}
                                 </div>
-                              </div>
-                              <div className={`text-[10px] px-1.5 py-0.5 rounded ${getDifficultyColor(variant.difficulty_level)}`}>
-                                {variant.difficulty_level}
+                                <div className="text-[10px] text-slate-500">
+                                  {formatDuration(variant.total_time_hours)} • {variant.total_distance_nm.toFixed(1)} nm • {variant.average_speed_knots.toFixed(1)} kt
+                                </div>
                               </div>
                             </div>
-
-                            {/* Expanded details when selected */}
-                            {selectedVariantIds.includes(variant.variant_id) && (
-                              <div className="mt-2 pt-2 border-t border-slate-200 grid grid-cols-4 gap-1 text-[10px]">
-                                <div className="text-center">
-                                  <div className="text-slate-600 font-medium">Wiatr</div>
-                                  <div className="font-bold text-slate-800">{(Math.round((variant.avg_wind_speed * 0.53) * 2) / 2).toFixed(1)} kt</div>
-                                </div>
-                                <div className="text-center">
-                                  <div className="text-slate-600 font-medium">Fale</div>
-                                  <div className="font-bold text-slate-800">{variant.avg_wave_height.toFixed(2)} m</div>
-                                </div>
-                                <div className="text-center">
-                                  <div className="text-slate-600 font-medium">Zwroty</div>
-                                  <div className="font-bold text-slate-800">{variant.tacks_count}</div>
-                                </div>
-                                <div className="text-center">
-                                  <div className="text-slate-600 font-medium">Przejścia</div>
-                                  <div className="font-bold text-slate-800">{variant.jibes_count}</div>
-                                </div>
-                              </div>
-                            )}
+                            <div className={`text-[10px] px-1.5 py-0.5 rounded ${getDifficultyColor(variant.difficulty_level)}`}>
+                              {variant.difficulty_level}
+                            </div>
                           </div>
-                        ))}
-                      </div>
 
-                      {/* Actions */}
-                      <div className="p-2 border-t bg-slate-50 flex gap-2">
-                        <button
-                          onClick={handleSelectAllVariants}
-                          className="flex-1 py-1.5 text-xs bg-slate-200 text-slate-700 rounded hover:bg-slate-300"
-                        >
-                          Zaznacz wszystkie
-                        </button>
-                        <button
-                          onClick={handleNewRoute}
-                          className="flex-1 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
-                        >
-                          Nowa trasa
-                        </button>
-                      </div>
-                   </div>
+                          {selectedVariantIds.includes(variant.variant_id) && (
+                            <div className="mt-2 pt-2 border-t border-slate-200 grid grid-cols-4 gap-1 text-[10px]">
+                              <div className="text-center">
+                                <div className="text-slate-600 font-medium">Wiatr</div>
+                                <div className="font-bold text-slate-800">{(Math.round((variant.avg_wind_speed * 0.53) * 2) / 2).toFixed(1)} kt</div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-slate-600 font-medium">Fale</div>
+                                <div className="font-bold text-slate-800">{variant.avg_wave_height.toFixed(2)} m</div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-slate-600 font-medium">Zwroty</div>
+                                <div className="font-bold text-slate-800">{variant.tacks_count}</div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-slate-600 font-medium">Przejścia</div>
+                                <div className="font-bold text-slate-800">{variant.jibes_count}</div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Actions */}
+                    <div className="p-2 border-t bg-slate-50 flex gap-2">
+                      <button
+                        onClick={handleSelectAllVariants}
+                        className="flex-1 py-1.5 text-xs bg-slate-200 text-slate-700 rounded hover:bg-slate-300"
+                      >
+                        Zaznacz wszystkie
+                      </button>
+                      <button
+                        onClick={handleNewRoute}
+                        className="flex-1 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
+                      >
+                        Nowa trasa
+                      </button>
+                    </div>
+                  </div>
                 )}
-            </div>
+              </div>
             )}
 
             {/* ACTION BUTTON */}
             <div className="p-4 bg-slate-50 mt-auto border-t border-slate-200">
-                {!calcStatus.routeResult ? (
-                  <>
-                    <button
-                        onClick={handleCalculateRoute}
-                        disabled={!canCalculate}
-                        className="w-full py-3 bg-green-600 text-white rounded font-bold shadow hover:bg-green-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition-all active:scale-[0.98]"
-                    >
-                        {isCalculating ? calcStatus.message : 'OBLICZ TRASE'}
-                    </button>
-
-                    {!canCalculate && !isCalculating && (
-                        <p className="text-[10px] text-slate-400 text-center mt-2">
-                            {!selectedYachtId ? "① Wybierz jacht" : ""}
-                            {selectedYachtId && controlPoints.length < 2 ? "② Dodaj min. 2 punkty na mapie" : ""}
-                        </p>
-                    )}
-
-                    {/* Mini status */}
-                    {calcStatus.step !== 'idle' && calcStatus.step !== 'done' && calcStatus.step !== 'error' && (
-                      <div className="mt-2 text-xs text-center">
-                        <div className="w-full bg-slate-200 rounded-full h-1.5 mb-1">
-                          <div
-                            className="bg-blue-600 h-1.5 rounded-full transition-all duration-500"
-                            style={{width: `${getStepProgress()}%`}}
-                          ></div>
-                        </div>
-                        <span className="text-slate-500">{calcStatus.message}</span>
+              {!calcStatus.routeResult ? (
+                <>
+                  <button
+                    onClick={handleCalculateRoute}
+                    disabled={!canCalculate}
+                    className="w-full py-3 bg-green-600 text-white rounded font-bold shadow hover:bg-green-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition-all active:scale-[0.98]"
+                  >
+                    {isCalculating ? calcStatus.message : 'OBLICZ TRASĘ'}
+                  </button>
+                  {!canCalculate && !isCalculating && (
+                    <p className="text-[10px] text-slate-400 text-center mt-2">
+                      {!selectedYachtId ? "① Wybierz jacht" : ""}
+                      {selectedYachtId && controlPoints.length < 2 ? "② Dodaj min. 2 punkty na mapie" : ""}
+                    </p>
+                  )}
+                  {calcStatus.step !== 'idle' && calcStatus.step !== 'done' && calcStatus.step !== 'error' && (
+                    <div className="mt-2 text-xs text-center">
+                      <div className="w-full bg-slate-200 rounded-full h-1.5 mb-1">
+                        <div
+                          className="bg-blue-600 h-1.5 rounded-full transition-all duration-500"
+                          style={{width: `${getStepProgress()}%`}}
+                        ></div>
                       </div>
-                    )}
-                  </>
-                ) : (
-                  <div className="text-center">
-                    <div className="text-sm text-green-600 font-bold mb-2">Trasa obliczona!</div>
-                    <div className="text-xs text-slate-500">
-                      Wybrano {selectedVariantIds.length} z {calcStatus.routeResult.variants_count} wariantów
+                      <span className="text-slate-500">{calcStatus.message}</span>
                     </div>
+                  )}
+                </>
+              ) : (
+                <div className="text-center">
+                  <div className="text-sm text-green-600 font-bold mb-2">Trasa obliczona!</div>
+                  <div className="text-xs text-slate-500">
+                    Wybrano {selectedVariantIds.length} z {calcStatus.routeResult.variants_count} wariantów
                   </div>
-                )}
+                </div>
+              )}
             </div>
-
         </div>
       </div>
     </main>

@@ -194,7 +194,7 @@ class IterativeRouteCalculator:
             
             profile.weather_points.append(weather_point)
             
-        print(f"[ITER] Initial profile created. Avg Speed: {initial_speed_ms:.2f * 1.93} knts. " 
+        print(f"[ITER] Initial profile created. Avg Speed: {initial_speed_ms * 1.94384:.2f} knts. "
               f"Points: {len(profile.weather_points)}")
         
         return profile
