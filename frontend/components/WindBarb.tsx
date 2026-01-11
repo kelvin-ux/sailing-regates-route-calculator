@@ -65,7 +65,7 @@ export default function WindBarb({
   }
   
   // Buduj elementy barba
-  const elements: JSX.Element[] = [];
+  const elements: React.ReactNode[] = [];
   let yOffset = 4; // Start od góry
   
   // Kółko na końcu (punkt obserwacji)
