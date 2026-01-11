@@ -5,19 +5,20 @@ from pydantic_settings import SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(env_file_encoding="utf-8")
     API_V1_STR: str = "/api/v1"
     PROJECT_NAME: str = "SailingRoutes"
 
 
 class DevSettings(Settings):
+    model_config = SettingsConfigDict(env_file=".env.dev", env_file_encoding="utf-8")
     SQLALCHEMY_DATABASE_URI: str
-    DEBUG: bool
+    DEBUG: bool = True
 
 
 class ProdSettings(Settings):
     SQLALCHEMY_DATABASE_URI: str
-    DEBUG: bool
+    DEBUG: bool = False
 
 
 class TestSettings(Settings):
@@ -28,9 +29,9 @@ class TestSettings(Settings):
 env = os.getenv("ENV_TYPE", "development")
 if env == "production":
     settings = ProdSettings()
-if env == "test":
+elif env == "test":
     settings = TestSettings()
 else:
-    settings = DevSettings(_env_file=".env.dev", _env_file_encoding="utf-8")
+    settings = DevSettings()
 
-print("Current settings:", settings)
+print(f"Environment: {env}, Settings: {type(settings).__name__}")
